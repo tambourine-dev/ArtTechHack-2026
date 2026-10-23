@@ -22,5 +22,4 @@
 - create an EXPERIENCE
 - power of perception, show 2 sides of a world one fucked up the other rosy, experience for 2?
 - experience shouldnt convey any feelings/morals one should feel, ppl should figure out themselves how they feel abt sth --> should be neutral
-- experience shouldnt be hardcoded but generative, e.g. you can change amount of tracking by slider
-- 
+- experience shouldnt be hardcoded but generative, e.g. you can change amount of tracking by slider, some kind of input
