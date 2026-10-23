@@ -25,6 +25,7 @@
 -  2 people involved, one party experiences with vr and the other is in control
 - Baum
 - Zeichnen mit Licht 
+- glimpses of social disaproval
 
 ## Topics
 
