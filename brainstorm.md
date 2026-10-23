@@ -43,4 +43,17 @@
 - Glody Figueiredo: LLM/ AI support
 - Martin Fröhlich:	Immersive technologies
 
+# Brainstorm refinment
+- person mit vr brille als ueberwachungsinstanz
+- person mit vr brille wird ueberwacht
+- person hoert stimmen
+- persons interner dialog wird externalisiert
+- werbung im field of view (kapitalismus)
+- tisch in alle informationen zerleit (wissenschaftlich)
+- falsche realitaet / vater in anderem raum
+
+- informative anzeigen im AR.
+  - Am anfang noch sehr informativ.
+  - desto spaeter desto mehr werbung
+
 
