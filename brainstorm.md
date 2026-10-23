@@ -43,6 +43,11 @@
 - Glody Figueiredo: LLM/ AI support
 - Martin Fröhlich:	Immersive technologies
 
+## Pipeline
+
+- AR
+- LLM that takes visual imputs and generates audio / text outputs
+
 # Brainstorm refinment
 - person mit vr brille als ueberwachungsinstanz
 - person mit vr brille wird ueberwacht
