@@ -1,11 +1,10 @@
 # Brainstorm
 23. October 2026
 
-
 ## Topic: CHALLENGE 03 – Spatial Al & The Mind
 
 > Build an interactive system, generative tool, game or VR/KR experience using gaussian splatting eye-tracking while considering the human mind and its spatial decision-making.
-> FOR EXAMPLE
+> **FOR EXAMPLE**
 > - Feed gaze to a vision model to adapt environments create an experience
 > - or game that reveals how human minds will negotiate space with algorithmic systems lin the future
 
@@ -24,3 +23,23 @@
 - experience shouldnt convey any feelings/morals one should feel, ppl should figure out themselves how they feel abt sth --> should be neutral
 - experience shouldnt be hardcoded but generative, e.g. you can change amount of tracking by slider, some kind of input
 -  2 people involved, one party experiences with vr and the other is in control
+- Baum
+- Zeichnen mit Licht 
+
+## Topics
+
+- State surveillance
+- Impact of Technology on Emotions
+- Axienty, Consciousness
+- Information overload
+- 
+
+## Mentor List
+
+- Leonel Aguilar: Data science & cognitive science (ETH)
+- Lina Lopes: Creative technology
+- Philippe Kocher: Music theory, composition, computer music (ZHdK)
+- Glody Figueiredo: LLM/ AI support
+- Martin Fröhlich:	Immersive technologies
+
+
