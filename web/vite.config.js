@@ -62,6 +62,32 @@ function webSearch() {
   };
 }
 
+// GET /stimuli → { percent }, POST /stimuli { percent } sets it: the share of boxes shown
+// in the headset, set from the slider on control.html. Kept in memory, 100 at start.
+function stimuliControl() {
+  let percent = 100;
+  const middleware = (req, res, next) => {
+    if (new URL(req.url, 'http://localhost').pathname !== '/stimuli') return next();
+    res.setHeader('Content-Type', 'application/json');
+    if (req.method !== 'POST') return res.end(JSON.stringify({ percent }));
+    let body = '';
+    req.on('data', (chunk) => (body += chunk));
+    req.on('end', () => {
+      let value = NaN;
+      try {
+        value = Number(JSON.parse(body).percent);
+      } catch {}
+      if (Number.isFinite(value)) percent = Math.min(100, Math.max(0, value));
+      res.end(JSON.stringify({ percent }));
+    });
+  };
+  return {
+    name: 'stimuli-control',
+    configureServer: (server) => void server.middlewares.use(middleware),
+    configurePreviewServer: (server) => void server.middlewares.use(middleware),
+  };
+}
+
 // WebXR only runs in a secure context, so the headset needs HTTPS to reach the dev server
 // over the local network. `host: true` exposes the server on the LAN.
 //
@@ -74,7 +100,7 @@ export default defineConfig(({ mode }) => {
   const server = { host: true, proxy, ...(behindProxy && { allowedHosts }) };
 
   return {
-    plugins: behindProxy ? [webSearch()] : [basicSsl(), webSearch()],
+    plugins: behindProxy ? [webSearch(), stimuliControl()] : [basicSsl(), webSearch(), stimuliControl()],
     server,
     preview: server,
   };

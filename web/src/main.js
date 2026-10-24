@@ -6,6 +6,7 @@ import { drawTag, drawTracks } from './draw.js';
 import { createFaceModel, currentEmotion, drawFaces, FaceTracker } from './faces.js';
 import { flickerFor, Glitch, GLITCH_GLSL, presentGlitched } from './glitch.js';
 import { startCamera } from './camera.js';
+import { drawStimuli, pickStimuli } from './stimuli.js';
 import { narrate } from './llm.js';
 import { clearSpeech, speak, stopSpeaking, unlockSpeech } from './speech.js';
 
@@ -128,9 +129,10 @@ function drawView() {
     view.height = video.videoHeight;
   }
   vctx.drawImage(video, 0, 0, view.width, view.height);
-  drawTracks(vctx, tracks, view.width, view.height);
-  drawFaces(vctx, faces, view.width, view.height);
+  drawTracks(vctx, pickStimuli(tracks), view.width, view.height);
+  drawFaces(vctx, pickStimuli(faces), view.width, view.height);
   drawAsking(vctx, view.width);
+  drawStimuli(vctx, view.width);
 }
 
 // Fits the composed frame into the window, with the glitch on top.
@@ -416,9 +418,10 @@ function drawBoxes() {
     boxTexture.dispose(); // reallocate at the new size on the next upload
   }
   boxCtx.clearRect(0, 0, W, H);
-  drawTracks(boxCtx, tracks, W, H);
-  drawFaces(boxCtx, faces, W, H);
+  drawTracks(boxCtx, pickStimuli(tracks), W, H);
+  drawFaces(boxCtx, pickStimuli(faces), W, H);
   drawAsking(boxCtx, W);
+  drawStimuli(boxCtx, W);
 
   if (calibrating) {
     const text =
