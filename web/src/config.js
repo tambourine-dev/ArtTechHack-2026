@@ -27,7 +27,7 @@ export const CONFIG = {
   emotionSmoothing: 0.35,// how fast the expression reacts (0..1): higher = faster, lower = steadier
   minEmotion: 0.3,       // below this strength the face is called "neutral"
   // Sensitivity per expression: raise a number if that expression is under-detected, lower it if it triggers too easily
-  gain: { happy: 1.6, sad: 1.8, angry: 1.5, surprised: 1.3 },
+  gain: { happy: 1.6, sad: 2.4, angry: 2.4, surprised: 1.3 },
 
   // Face mesh (M key)
   mesh: false,
