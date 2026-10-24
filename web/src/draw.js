@@ -1,5 +1,5 @@
-// Box and tag drawing ported from object_recog, shared by the 2D view (flat screen and the
-// phone panel in AR) and the labels of the boxes placed in the room.
+// Box and tag drawing ported from object_recog, used for the full-screen view and the
+// AR overlay.
 import { CONFIG } from './config.js';
 
 // Dark text on light colors, white on dark ones.

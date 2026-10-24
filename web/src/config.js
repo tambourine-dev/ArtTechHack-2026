@@ -23,5 +23,3 @@ export const CONFIG = {
   cameraPitch: 0,        // degrees the picture is shifted up (+) or down (-)
   overlayDistance: 1.5,  // metres, when the gaze hit-test hasn't found a surface
 };
-
-export const PEER_PREFIX = 'handpoint-'; // must match public/phone-sender.html

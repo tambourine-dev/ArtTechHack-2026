@@ -10,29 +10,18 @@
       #panel { position: fixed; top: 16px; left: 16px; right: 16px; max-width: 420px; padding: 16px 20px; border-radius: 14px; background: rgba(0, 0, 0, .75); z-index: 2; }
       #panel h2 { margin: 0 0 12px; }
       #panel p { margin: 10px 0; }
-      .row { display: flex; flex-wrap: wrap; gap: 8px; }
       button { font: inherit; font-size: 16px; padding: 10px 14px; border-radius: 10px; border: 0; background: #fff; color: #000; cursor: pointer; }
       button:disabled { opacity: .45; cursor: default; }
-      #start-ar { width: 100%; margin-top: 12px; padding: 14px; font-size: 18px; font-weight: bold; background: #2f6; }
-      #code { font-size: 36px; letter-spacing: .2em; font-weight: bold; color: #2f6; }
-      #link { word-break: break-all; color: #9cf; }
+      #start-ar { width: 100%; margin-top: 4px; padding: 14px; font-size: 18px; font-weight: bold; background: #2f6; }
     </style>
   </head>
   <body>
     <canvas id="view"></canvas>
     <div id="panel">
       <h2>Object recognition AR</h2>
-      <p>1. Choose the camera (before entering AR):</p>
-      <div class="row">
-        <button id="use-headset">Headset camera</button>
-        <button id="use-phone">Phone camera</button>
-      </div>
-      <div id="pairing" hidden>
-        <p>Code: <span id="code">----</span></p>
-        <p>On the phone, open:<br /><span id="link"></span></p>
-      </div>
+      <button id="start-camera">Start camera</button>
       <p id="msg">Loading object model…</p>
-      <button id="start-ar" disabled>2. Start AR</button>
+      <button id="start-ar" disabled hidden>Start AR</button>
     </div>
     <script type="module" src="/src/main.js"></script>
   </body>

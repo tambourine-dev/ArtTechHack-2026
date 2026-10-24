@@ -3,7 +3,7 @@ import { CONFIG } from './config.js';
 import { createDetector, detect } from './detector.js';
 import { Tracker } from './tracker.js';
 import { drawTracks } from './draw.js';
-import { startHeadsetCamera, startPhoneReceiver } from './sources.js';
+import { startCamera } from './camera.js';
 
 // Quest 3 has no eye-tracking cameras, and the Quest browser doesn't expose eye gaze to
 // WebXR on any headset. The gaze dot therefore follows the head: it sits where the centre
@@ -24,7 +24,6 @@ const msg = (text) => ($('msg').textContent = text);
 
 let detector = null;
 let video = null;
-let source = null; // 'headset' | 'phone'
 let lastVideoTime = -1;
 let lastDetect = 0;
 let detectMs = 0;
@@ -35,8 +34,8 @@ const tracker = new Tracker();
 const frame = document.createElement('canvas');
 const fctx = frame.getContext('2d', { willReadFrequently: true });
 
-// The camera picture with the boxes drawn on, as in object_recog. Shown full screen
-// outside AR, and on a floating panel in AR when the camera is a phone.
+// The camera picture with the boxes drawn on, as in object_recog, shown full screen
+// outside AR (on a phone, this is the overlay).
 const view = document.createElement('canvas');
 const vctx = view.getContext('2d');
 const out = $('view');
@@ -45,7 +44,7 @@ const octx = out.getContext('2d');
 createDetector().then(
   (d) => {
     detector = d;
-    msg(video ? 'Object model ready.' : 'Object model ready. Choose a camera.');
+    msg(video ? 'Object model ready.' : 'Object model ready. Start the camera.');
   },
   (err) => {
     console.error(err);
@@ -53,40 +52,25 @@ createDetector().then(
   },
 );
 
-function useSource(name, v) {
-  source = name;
-  video = v;
-  lastVideoTime = -1;
-  tracker.clear();
-  $('use-headset').disabled = $('use-phone').disabled = true;
-}
+// Phones show the camera picture full screen with the boxes, which lines up exactly with
+// what you see. Headsets (Quest) also get "Start AR", with the boxes over the passthrough.
+const isPhone = /Android|iPhone|iPad/.test(navigator.userAgent) && !/OculusBrowser|Quest/.test(navigator.userAgent);
 
-$('use-headset').addEventListener('click', async () => {
+$('start-camera').addEventListener('click', async () => {
+  const button = $('start-camera');
+  button.disabled = true;
   try {
-    msg('Starting headset camera…');
-    useSource('headset', await startHeadsetCamera());
-    msg('Headset camera on. Start AR when ready.');
+    msg('Starting camera…');
+    video = await startCamera();
+    lastVideoTime = -1;
+    button.hidden = true;
+    if (isPhone) $('panel').hidden = true;
+    msg('Camera on. Start AR when ready.');
   } catch (err) {
     console.error(err);
-    msg(`Camera unavailable: ${err.message}. Allow "headset cameras" for the browser, or use the phone.`);
+    button.disabled = false;
+    msg(`Camera unavailable: ${err.message}. On Quest, allow "headset cameras" for the browser.`);
   }
-});
-
-$('use-phone').addEventListener('click', () => {
-  useSource(
-    'phone',
-    startPhoneReceiver({
-      onCode(code, link) {
-        $('pairing').hidden = false;
-        $('code').textContent = code;
-        $('link').textContent = link;
-        msg('Waiting for the phone…');
-      },
-      onConnected: () => msg('Phone connected. Start AR when ready.'),
-      onDisconnected: () => msg('Phone disconnected.'),
-      onError: (e) => msg(`Connection error: ${e.type}`),
-    }),
-  );
 });
 
 // Detects on every new camera frame (or at most every CONFIG.detectEveryMs).
@@ -111,7 +95,7 @@ function runDetection() {
   return true;
 }
 
-// The camera picture with the boxes, for the flat screen and the phone panel.
+// The camera picture with the boxes, for the flat screen.
 function drawView() {
   if (view.width !== video.videoWidth || view.height !== video.videoHeight) {
     view.width = video.videoWidth;
@@ -226,27 +210,6 @@ function lookedAt() {
     .sort((a, b) => a.w * a.h - b.w * b.h)[0];
 }
 
-// --- Phone panel --------------------------------------------------------------
-
-// The phone camera doesn't share the headset's viewpoint, so its boxes can't line up with
-// the real objects. In AR it's shown as a floating panel; pinch or pull the trigger to move it.
-const panelTexture = new THREE.CanvasTexture(view);
-panelTexture.colorSpace = THREE.SRGBColorSpace;
-const panel = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: panelTexture }));
-panel.visible = false;
-scene.add(panel);
-
-function placePanel() {
-  panel.visible = source === 'phone' && view.width > 0;
-  if (!panel.visible) return;
-  const width = 0.9;
-  panel.scale.set(width, (width * view.height) / view.width, 1);
-  panel.position.copy(headPos).addScaledVector(headDir, 1.2);
-  panel.lookAt(headPos);
-}
-
-for (const i of [0, 1]) renderer.xr.getController(i).addEventListener('select', placePanel);
-
 // --- Gaze dot ---------------------------------------------------------------
 
 const dot = new THREE.Sprite(new THREE.SpriteMaterial({ map: circleTexture(), color: DOT_COLOR, depthTest: false }));
@@ -331,11 +294,12 @@ function toggleCalibration() {
 // the distance to what you're looking at (needs Space Setup on the headset). No
 // dom-overlay: Quest doesn't support it, so everything in AR is drawn by three.js.
 const arButton = $('start-ar');
-navigator.xr?.isSessionSupported('immersive-ar').then((ok) => {
-  arButton.disabled = !ok;
-  if (!ok) arButton.textContent = 'AR not supported on this device';
-});
-if (!navigator.xr) arButton.textContent = 'WebXR not available (needs HTTPS and a WebXR browser)';
+if (!isPhone) {
+  navigator.xr?.isSessionSupported('immersive-ar').then((ok) => {
+    arButton.hidden = !ok;
+    arButton.disabled = !ok;
+  });
+}
 
 arButton.addEventListener('click', async () => {
   try {
@@ -360,7 +324,6 @@ renderer.xr.addEventListener('sessionstart', async () => {
 
 renderer.xr.addEventListener('sessionend', () => {
   hitTestSource = null;
-  panel.visible = false;
   overlayPivot.visible = false;
   if (calibrating) toggleCalibration();
   $('panel').hidden = false;
@@ -396,21 +359,12 @@ renderer.setAnimationLoop((time, xrFrame) => {
 
   updateGaze(xrFrame);
   updateCalibration(xrFrame, dt);
-  if (video && source === 'headset') {
-    overlayPivot.visible = video.videoWidth > 0;
-    if (overlayPivot.visible) {
-      layoutOverlay();
-      if (detected || calibrating) drawOverlay();
-      const target = lookedAt();
-      dot.material.color.set(target?.color ?? DOT_COLOR);
-    }
-  } else if (source === 'phone') {
-    if (detected) {
-      drawView();
-      panelTexture.needsUpdate = true;
-    }
-    // Place the phone panel once there's a head pose and a picture.
-    if (!panel.visible) placePanel();
+  overlayPivot.visible = video?.videoWidth > 0;
+  if (overlayPivot.visible) {
+    layoutOverlay();
+    if (detected || calibrating) drawOverlay();
+    const target = lookedAt();
+    dot.material.color.set(target?.color ?? DOT_COLOR);
   }
   renderer.render(scene, camera);
 });
