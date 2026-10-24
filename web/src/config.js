@@ -37,8 +37,10 @@ export const CONFIG = {
 
   // Asking the LLM about what you look at
   ask: true,
-  dwellMs: 1000,         // how long you have to look at a box before it's asked about
-  askImageSize: 512,     // the crop sent to the LLM is scaled to this many pixels on its longest side
+  dwellMs: 1000,         // how long you have to look at something before the narration starts
+  switchMs: 1500,        // while narrating, how long you have to look at something else before it switches
+  describeScene: true,   // looking at no box narrates the whole scene instead of going quiet
+  askImageSize: 384,     // the crop sent to the LLM is scaled to this many pixels on its longest side (smaller = faster)
   speechLang: 'en-US',   // voice language of the browser's text to speech
 
   // Glitch effect (G key, or Y on the left controller in AR). Applied to what you see only,

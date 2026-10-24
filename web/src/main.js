@@ -1,13 +1,13 @@
 import * as THREE from 'three';
 import { CONFIG } from './config.js';
 import { createDetector, detect } from './detector.js';
-import { Tracker } from './tracker.js';
+import { iou, Tracker } from './tracker.js';
 import { drawTag, drawTracks } from './draw.js';
 import { createFaceModel, currentEmotion, drawFaces, FaceTracker } from './faces.js';
 import { flickerFor, Glitch, GLITCH_GLSL, presentGlitched } from './glitch.js';
 import { startCamera } from './camera.js';
-import { describeObject } from './llm.js';
-import { say, unlockSpeech } from './speech.js';
+import { narrate } from './llm.js';
+import { clearSpeech, speak, stopSpeaking, unlockSpeech } from './speech.js';
 
 const CALIBRATION_KEY = 'overlayCalibration';
 const CALIBRATION_FIELDS = ['cameraHFov', 'cameraYaw', 'cameraPitch', 'cameraLatencyMs'];
@@ -143,38 +143,79 @@ function present() {
 
 // --- Asking about objects --------------------------------------------------
 
-// Looking at the same box for CONFIG.dwellMs sends a crop of it to the LLM, which can search
-// the web, and its answer is spoken. One question at a time, and a box isn't asked about
-// again until you've looked away from it. Where boxes overlap, lookedAt() picks the smallest.
-let gazeTrack = null;
+// Whatever you look at for CONFIG.dwellMs (a box, or with CONFIG.describeScene the whole
+// scene when you look at no box) starts a narration: a crop goes to the LLM, which keeps
+// talking about it, searching the web for more, for as long as you keep looking. Settling
+// on something else for CONFIG.switchMs switches to it: the sentence being spoken finishes,
+// the queued ones are dropped, and the new target starts over.
+// Where boxes overlap, lookedAt() picks the smallest.
+let gazeId = null; // what the gaze is on now: a track id, 'scene', or null
 let gazeSince = 0;
-let askedId = null;
-let asking = null; // { name, speaking } while the LLM thinks or the answer is spoken
+let session = null; // { id, name, box, abort, waiting } while narrating
+let finishedId = null; // a narration that ran out of things to say isn't restarted until you look away
 
-function updateGaze(track, now) {
-  if (track?.id !== gazeTrack?.id) {
-    gazeTrack = track;
-    gazeSince = now;
-    askedId = null;
-  }
-  if (CONFIG.ask && track && !asking && track.id !== askedId && now - gazeSince >= CONFIG.dwellMs) ask(track);
+// The tracker sometimes loses a box and finds it again under a new id; a box of the same
+// kind where the narrated one was still counts as the narrated object.
+function gazeTarget(track) {
+  if (!track) return CONFIG.describeScene ? 'scene' : null;
+  if (session?.box && track.name === session.name && iou(track, session.box) > 0.3) return session.id;
+  return track.id;
 }
 
-async function ask(track) {
-  askedId = track.id;
-  asking = { name: track.name, speaking: false };
+function updateGaze(track, now) {
+  const id = gazeTarget(track);
+  if (id !== gazeId) {
+    gazeId = id;
+    gazeSince = now;
+    finishedId = null;
+  }
+  if (!CONFIG.ask || id === (session?.id ?? null) || id === finishedId) return;
+  if (now - gazeSince < (session ? CONFIG.switchMs : CONFIG.dwellMs)) return;
+  if (id === null) stopSession();
+  else startSession(id, track);
+}
+
+// Cancels the LLM request and drops the queued sentences; the sentence being spoken
+// finishes, unless hard is set (leaving AR).
+function stopSession(hard = false) {
+  session?.abort.abort();
+  session = null;
+  if (hard) stopSpeaking();
+  else clearSpeech();
+}
+
+async function startSession(id, track) {
+  stopSession();
+  const box = track && { x: track.x, y: track.y, w: track.w, h: track.h };
+  const s = { id, name: track?.name ?? 'the scene', box, abort: new AbortController(), waiting: true };
+  session = s;
+  const image = cropOf(track ?? { x: 0, y: 0, w: 1, h: 1 });
+  // While one turn is spoken the next is generated, but no further ahead than that.
+  let lastSentence = Promise.resolve();
+  let previousTurn = Promise.resolve();
   try {
-    msg(`Looking up ${track.name}…`);
-    const text = await describeObject(cropOf(track), track.name);
-    console.log('[llm]', text);
-    msg(text || `No answer about ${track.name}.`);
-    asking.speaking = true;
-    await say(text, CONFIG.speechLang);
+    msg(`Looking at ${s.name}…`);
+    for await (const part of narrate(image, track?.name ?? null, s.abort.signal)) {
+      if (session !== s) break;
+      if (part.end) {
+        await previousTurn;
+        previousTurn = lastSentence;
+        continue;
+      }
+      s.waiting = false;
+      console.log(`[llm] ${s.name}:`, part.sentence);
+      msg(part.sentence);
+      lastSentence = speak(part.sentence, CONFIG.speechLang);
+    }
   } catch (err) {
+    if (s.abort.signal.aborted) return;
     console.error(err);
     msg(`LLM error: ${err.message}`);
   }
-  asking = null;
+  if (session === s) {
+    session = null;
+    finishedId = s.id;
+  }
 }
 
 // The box (plus a margin) cut out of the full-resolution camera picture, as a JPEG data URL.
@@ -194,11 +235,11 @@ function cropOf(t) {
   return crop.toDataURL('image/jpeg', 0.85);
 }
 
-// "thinking about cup…" at the top of the picture while the LLM works.
+// "thinking about cup…" at the top of the picture until the first sentence arrives.
 function drawAsking(ctx, w) {
-  if (!asking || asking.speaking) return;
+  if (!session?.waiting) return;
   const fs = Math.max(14, 22 * (w / 640));
-  drawTag(ctx, `thinking about ${asking.name}…`, fs, fs, fs, '#ffffff');
+  drawTag(ctx, `thinking about ${session.name}…`, fs, fs, fs, '#ffffff');
 }
 
 // --- AR view ----------------------------------------------------------------
@@ -496,6 +537,8 @@ renderer.xr.addEventListener('sessionend', () => {
   hasCapture = false;
   headHistory.length = 0;
   if (calibrating) toggleCalibration();
+  stopSession(true);
+  gazeId = null;
   $('panel').hidden = false;
 });
 
