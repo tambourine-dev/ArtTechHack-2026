@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Object viewer</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,sans-serif;color:#fff}
+  canvas{position:fixed;inset:0;width:100%;height:100%}
+  #panel{position:fixed;top:16px;left:16px;max-width:420px;padding:16px 20px;border-radius:14px;background:rgba(0,0,0,.75);z-index:2}
+  #panel h2{margin:0 0 8px}
+  #code{font-size:36px;letter-spacing:.2em;font-weight:bold;color:#2f6}
+  #link{word-break:break-all;color:#9cf}
+  video{display:none}
+</style>
+</head>
+<body>
+<canvas id="out"></canvas>
+<video id="video" playsinline muted autoplay></video>
+
+<div id="panel">
+  <h2 id="title">Waiting for the phone...</h2>
+  <div>Code: <span id="code">----</span></div>
+  <p>On the phone, open:<br><span id="link"></span></p>
+  <p id="msg">Loading object model...</p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script type="module">
+import { ObjectDetector, FilesetResolver }
+  from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+// ---------- Config ----------
+const CONFIG = {
+  score: 0.4,            // minimum confidence (0..1). Lower = more boxes, higher = cleaner
+  maxResults: 25,
+  minAreaFrac: 0.0006,   // ignore boxes smaller than this fraction of the picture (removes specks)
+  ignore: [],            // categories to hide, e.g. ["person", "chair"]
+  only: [],              // if not empty, show ONLY these categories, e.g. ["cup", "bottle"]
+  showScore: false,      // true = "cup 87%"
+  smoothing: 0.45,       // how fast boxes follow movement (0..1): higher = snappier, lower = steadier
+  confirmFrames: 2,      // a box must be seen this many times before it appears (stops flicker)
+  keepFrames: 5,         // a box stays this many frames after the object disappears
+  matchIou: 0.3,         // how much a new detection must overlap an old box to be "the same object"
+  lineWidth: 3,          // box thickness (scales with picture size)
+  palette: ["#66ff44", "#ff33ff", "#2b2bff", "#ffee33", "#33aaff", "#ff9933", "#33ffcc", "#ff4466", "#aa66ff", "#ccff33"]
+};
+const PREFIX = "handpoint-";                                  // must match phone-sender.html
+const BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+// EfficientDet-Lite2 is more accurate than Lite0 (the one used before)
+const OBJ_MODEL = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/float16/1/efficientdet_lite2.tflite";
+
+// ---------- Setup ----------
+const $ = id => document.getElementById(id);
+const video = $("video"), out = $("out"), octx = out.getContext("2d");
+const view = document.createElement("canvas"), vctx = view.getContext("2d");   // upright video + overlays
+let detector, lastVideoTime = -1, tracks = [], nextId = 1;
+
+const msg = t => { $("msg").textContent = t; };
+function resize() { out.width = innerWidth * devicePixelRatio; out.height = innerHeight * devicePixelRatio; }
+addEventListener("resize", resize); resize();
+
+// ---------- 1. Connection: wait for the phone's video ----------
+const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const newCode = () => Array.from({ length: 4 }, () => ALPHABET[Math.floor(Math.random() * ALPHABET.length)]).join("");
+
+function startPeer() {
+  const code = newCode();
+  const peer = new Peer(PREFIX + code);
+  peer.on("open", () => {
+    $("code").textContent = code;
+    $("link").textContent = new URL("phone-sender.html", location.href).href + "?code=" + code;
+  });
+  peer.on("error", e => {
+    if (e.type === "unavailable-id") { peer.destroy(); startPeer(); }
+    else msg("Connection error: " + e.type);
+  });
+  peer.on("call", call => {
+    call.answer();
+    call.on("stream", stream => {
+      video.srcObject = stream;
+      video.play().catch(() => {});
+      $("title").textContent = "Phone connected";
+      setTimeout(() => { $("panel").style.display = "none"; }, 2500);
+    });
+    call.on("close", () => { $("panel").style.display = "block"; $("title").textContent = "Phone disconnected"; });
+  });
+}
+startPeer();
+
+// ---------- 2. Load the object model ----------
+(async () => {
+  const fileset = await FilesetResolver.forVisionTasks(BASE + "/wasm");
+  const make = delegate => ObjectDetector.createFromOptions(fileset, {
+    baseOptions: { modelAssetPath: OBJ_MODEL, delegate }, runningMode: "VIDEO",
+    scoreThreshold: CONFIG.score, maxResults: CONFIG.maxResults
+  });
+  try { detector = await make("GPU"); } catch { detector = await make("CPU"); }
+  msg("Object model ready.");
+})().catch(e => { console.error(e); msg("Model error: " + e.message); });
+
+// ---------- Helpers ----------
+function colorFor(name) {                                     // the same category always gets the same color
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return CONFIG.palette[h % CONFIG.palette.length];
+}
+function textColorOn(hex) {                                   // dark text on light colors, white on dark ones
+  const n = parseInt(hex.slice(1), 16), r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+  return (0.299 * r + 0.587 * g + 0.114 * b) > 140 ? "#000" : "#fff";
+}
+function iou(a, b) {
+  const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+  if (w <= 0 || h <= 0) return 0;
+  const inter = w * h;
+  return inter / (a.w * a.h + b.w * b.h - inter);
+}
+
+// ---------- Tracking: match new detections to existing boxes so they glide instead of jitter ----------
+function updateTracks(dets) {
+  const used = new Set();
+  for (const t of tracks) {
+    let best = -1, bestIou = CONFIG.matchIou;
+    dets.forEach((d, i) => {
+      if (used.has(i) || d.name !== t.name) return;
+      const o = iou(t, d);
+      if (o > bestIou) { bestIou = o; best = i; }
+    });
+    if (best >= 0) {
+      const d = dets[best], k = CONFIG.smoothing;
+      used.add(best);
+      t.x += (d.x - t.x) * k; t.y += (d.y - t.y) * k;
+      t.w += (d.w - t.w) * k; t.h += (d.h - t.h) * k;
+      t.score = d.score; t.hits++; t.missed = 0;
+    } else t.missed++;
+  }
+  dets.forEach((d, i) => {
+    if (!used.has(i)) tracks.push({ id: nextId++, ...d, hits: 1, missed: 0, color: colorFor(d.name) });
+  });
+  tracks = tracks.filter(t => t.missed <= CONFIG.keepFrames);
+}
+
+// ---------- 3. Main loop ----------
+requestAnimationFrame(function loop() {
+  requestAnimationFrame(loop);
+  if (!detector || video.readyState < 2 || !video.videoWidth) return;
+  if (video.currentTime === lastVideoTime) return;            // no new frame from the phone yet
+  lastVideoTime = video.currentTime;
+
+  if (view.width !== video.videoWidth || view.height !== video.videoHeight) {
+    view.width = video.videoWidth; view.height = video.videoHeight;
+  }
+  vctx.drawImage(video, 0, 0, view.width, view.height);
+
+  // Detect on the canvas (the upright picture you actually see)
+  const res = detector.detectForVideo(view, performance.now());
+  const minArea = CONFIG.minAreaFrac * view.width * view.height;
+  const dets = res.detections
+    .map(d => ({ x: d.boundingBox.originX, y: d.boundingBox.originY, w: d.boundingBox.width, h: d.boundingBox.height,
+                 name: d.categories[0].categoryName, score: d.categories[0].score }))
+    .filter(d => d.w * d.h >= minArea)
+    .filter(d => !CONFIG.ignore.includes(d.name))
+    .filter(d => !CONFIG.only.length || CONFIG.only.includes(d.name));
+  updateTracks(dets);
+
+  // Draw big boxes first so small ones stay visible on top
+  const s = view.width / 640;
+  const visible = tracks.filter(t => t.hits >= CONFIG.confirmFrames && t.missed <= 2).sort((a, b) => b.w * b.h - a.w * a.h);
+  vctx.lineJoin = "miter";
+  vctx.textBaseline = "middle";
+  for (const t of visible) {
+    vctx.lineWidth = CONFIG.lineWidth * s;
+    vctx.strokeStyle = t.color;
+    vctx.strokeRect(t.x, t.y, t.w, t.h);
+
+    const fs = Math.max(11, 17 * s);
+    vctx.font = `${fs}px ui-monospace, Menlo, Consolas, monospace`;
+    const text = CONFIG.showScore ? `${t.name} ${Math.round(t.score * 100)}%` : t.name;
+    const padX = fs * 0.55, lh = fs * 1.5, tw = vctx.measureText(text).width + padX * 2;
+    let lx = Math.min(Math.max(t.x - CONFIG.lineWidth * s / 2, 0), view.width - tw);
+    let ly = t.y - lh + CONFIG.lineWidth * s / 2;             // tag sits on top of the box
+    if (ly < 0) ly = t.y + CONFIG.lineWidth * s / 2;          // no room above: put it inside
+    vctx.fillStyle = t.color;
+    vctx.fillRect(lx, ly, tw, lh);
+    vctx.fillStyle = textColorOn(t.color);
+    vctx.fillText(text, lx + padX, ly + lh / 2 + 1);
+  }
+  present();
+});
+
+function present() {                                          // fit the composed frame into the window
+  const W = out.width, H = out.height;
+  octx.fillStyle = "#000"; octx.fillRect(0, 0, W, H);
+  const k = Math.min(W / view.width, H / view.height);
+  const dw = view.width * k, dh = view.height * k;
+  octx.drawImage(view, (W - dw) / 2, (H - dh) / 2, dw, dh);
+}
+</script>
+</body>
+</html>

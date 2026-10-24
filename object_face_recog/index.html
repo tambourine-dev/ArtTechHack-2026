@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Object + expression viewer</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,sans-serif;color:#fff}
+  canvas{position:fixed;inset:0;width:100%;height:100%}
+  #panel{position:fixed;top:16px;left:16px;max-width:420px;padding:16px 20px;border-radius:14px;background:rgba(0,0,0,.75);z-index:2}
+  #panel h2{margin:0 0 8px}
+  #code{font-size:36px;letter-spacing:.2em;font-weight:bold;color:#2f6}
+  #link{word-break:break-all;color:#9cf}
+  video{display:none}
+</style>
+</head>
+<body>
+<canvas id="out"></canvas>
+<video id="video" playsinline muted autoplay></video>
+
+<div id="panel">
+  <h2 id="title">Waiting for the phone...</h2>
+  <div>Code: <span id="code">----</span></div>
+  <p>On the phone, open:<br><span id="link"></span></p>
+  <p id="msg">Loading models...</p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script type="module">
+import { ObjectDetector, FaceLandmarker, FilesetResolver }
+  from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+// ---------- Config ----------
+const CONFIG = {
+  // Objects
+  objects: true,
+  score: 0.4,            // minimum confidence (0..1). Lower = more boxes, higher = cleaner
+  maxResults: 25,
+  minAreaFrac: 0.0006,   // ignore boxes smaller than this fraction of the picture
+  ignore: [],            // categories to hide, e.g. ["person", "chair"]
+  only: [],              // if not empty, show ONLY these categories
+  showScore: false,
+  detectEvery: 2,        // run object detection every N video frames (faces run on every frame)
+  smoothing: 0.5,
+  confirmFrames: 2,
+  keepFrames: 4,
+  matchIou: 0.3,
+  lineWidth: 3,
+  palette: ["#66ff44", "#ff33ff", "#2b2bff", "#ffee33", "#33aaff", "#ff9933", "#33ffcc", "#ff4466", "#aa66ff", "#ccff33"],
+
+  // Faces + expressions
+  faces: true,
+  maxFaces: 6,
+  showPercent: true,     // "happy 82%"
+  emotionSmoothing: 0.35,// how fast the expression reacts (0..1): higher = faster, lower = steadier
+  minEmotion: 0.3,       // below this strength the face is called "neutral"
+  // Sensitivity per expression: raise a number if that expression is under-detected, lower it if it triggers too easily
+  gain: { happy: 1.6, sad: 2.4, angry: 2.4, surprised: 1.3 }
+};
+const PREFIX = "handpoint-";                                  // must match phone-sender.html
+const BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+const OBJ_MODEL  = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/float16/1/efficientdet_lite2.tflite";
+const FACE_MODEL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+
+const EMOTIONS = {
+  happy:     { color: "#ffd800", icon: "😀" },
+  sad:       { color: "#3b82ff", icon: "😢" },
+  angry:     { color: "#ff2d2d", icon: "😠" },
+  surprised: { color: "#ff9f1a", icon: "😮" },
+  neutral:   { color: "#e6e6e6", icon: "😐" }
+};
+
+// ---------- Setup ----------
+const $ = id => document.getElementById(id);
+const video = $("video"), out = $("out"), octx = out.getContext("2d");
+const view = document.createElement("canvas"), vctx = view.getContext("2d");   // upright video + overlays
+let objDetector, faceModel, lastVideoTime = -1, frameNo = 0;
+let tracks = [], nextId = 1, faceTracks = [];
+
+const msg = t => { $("msg").textContent = t; };
+function resize() { out.width = innerWidth * devicePixelRatio; out.height = innerHeight * devicePixelRatio; }
+addEventListener("resize", resize); resize();
+
+// ---------- 1. Connection: wait for the phone's video ----------
+const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const newCode = () => Array.from({ length: 4 }, () => ALPHABET[Math.floor(Math.random() * ALPHABET.length)]).join("");
+
+function startPeer() {
+  const code = newCode();
+  const peer = new Peer(PREFIX + code);
+  peer.on("open", () => {
+    $("code").textContent = code;
+    $("link").textContent = new URL("phone-sender.html", location.href).href + "?code=" + code;
+  });
+  peer.on("error", e => {
+    if (e.type === "unavailable-id") { peer.destroy(); startPeer(); }
+    else msg("Connection error: " + e.type);
+  });
+  peer.on("call", call => {
+    call.answer();
+    call.on("stream", stream => {
+      video.srcObject = stream;
+      video.play().catch(() => {});
+      $("title").textContent = "Phone connected";
+      setTimeout(() => { $("panel").style.display = "none"; }, 2500);
+    });
+    call.on("close", () => { $("panel").style.display = "block"; $("title").textContent = "Phone disconnected"; });
+  });
+}
+startPeer();
+
+// ---------- 2. Load the models ----------
+(async () => {
+  const fileset = await FilesetResolver.forVisionTasks(BASE + "/wasm");
+  const withFallback = async make => { try { return await make("GPU"); } catch { return await make("CPU"); } };
+  if (CONFIG.objects) {
+    objDetector = await withFallback(delegate => ObjectDetector.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: OBJ_MODEL, delegate }, runningMode: "VIDEO",
+      scoreThreshold: CONFIG.score, maxResults: CONFIG.maxResults
+    }));
+  }
+  if (CONFIG.faces) {
+    faceModel = await withFallback(delegate => FaceLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: FACE_MODEL, delegate }, runningMode: "VIDEO",
+      numFaces: CONFIG.maxFaces, outputFaceBlendshapes: true
+    }));
+  }
+  msg("Models ready.");
+})().catch(e => { console.error(e); msg("Model error: " + e.message); });
+
+// ---------- Helpers ----------
+function colorFor(name) {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return CONFIG.palette[h % CONFIG.palette.length];
+}
+function textColorOn(hex) {
+  const n = parseInt(hex.slice(1), 16), r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+  return (0.299 * r + 0.587 * g + 0.114 * b) > 140 ? "#000" : "#fff";
+}
+function iou(a, b) {
+  const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+  if (w <= 0 || h <= 0) return 0;
+  const inter = w * h;
+  return inter / (a.w * a.h + b.w * b.h - inter);
+}
+const clamp01 = v => Math.max(0, Math.min(1, v));
+
+// A tag: solid colored rectangle with text (the look from the example photo)
+function drawTag(text, x, y, color, s, below) {
+  const fs = Math.max(11, 17 * s);
+  vctx.font = `${fs}px ui-monospace, Menlo, Consolas, monospace`;
+  vctx.textBaseline = "middle";
+  const padX = fs * 0.55, lh = fs * 1.5, tw = vctx.measureText(text).width + padX * 2;
+  const lx = Math.min(Math.max(x, 0), Math.max(0, view.width - tw));
+  let ly = below ? y : y - lh;
+  if (ly < 0) ly = 0;
+  if (ly + lh > view.height) ly = view.height - lh;
+  vctx.fillStyle = color; vctx.fillRect(lx, ly, tw, lh);
+  vctx.fillStyle = textColorOn(color); vctx.fillText(text, lx + padX, ly + lh / 2 + 1);
+}
+
+// ---------- Objects: match new detections to old boxes so they glide instead of jitter ----------
+function updateTracks(dets) {
+  const used = new Set();
+  for (const t of tracks) {
+    let best = -1, bestIou = CONFIG.matchIou;
+    dets.forEach((d, i) => {
+      if (used.has(i) || d.name !== t.name) return;
+      const o = iou(t, d);
+      if (o > bestIou) { bestIou = o; best = i; }
+    });
+    if (best >= 0) {
+      const d = dets[best], k = CONFIG.smoothing;
+      used.add(best);
+      t.x += (d.x - t.x) * k; t.y += (d.y - t.y) * k;
+      t.w += (d.w - t.w) * k; t.h += (d.h - t.h) * k;
+      t.score = d.score; t.hits++; t.missed = 0;
+    } else t.missed++;
+  }
+  dets.forEach((d, i) => {
+    if (!used.has(i)) tracks.push({ id: nextId++, ...d, hits: 1, missed: 0, color: colorFor(d.name) });
+  });
+  tracks = tracks.filter(t => t.missed <= CONFIG.keepFrames);
+}
+
+// ---------- Faces: expression from the face model's "blendshapes" (muscle-movement scores) ----------
+function expressionScores(categories) {
+  const b = {};
+  for (const c of categories) b[c.categoryName] = c.score;
+  const avg = (l, r) => ((b[l] || 0) + (b[r] || 0)) / 2;
+  const g = CONFIG.gain;
+  const smile = avg("mouthSmileLeft", "mouthSmileRight");
+  const frown = avg("mouthFrownLeft", "mouthFrownRight");
+  const browDown = avg("browDownLeft", "browDownRight");
+  const squint = avg("eyeSquintLeft", "eyeSquintRight");
+  const sneer = avg("noseSneerLeft", "noseSneerRight");
+  const press = avg("mouthPressLeft", "mouthPressRight");
+  const eyeWide = avg("eyeWideLeft", "eyeWideRight");
+  const browOuter = avg("browOuterUpLeft", "browOuterUpRight");
+  const browInner = b.browInnerUp || 0;
+  const jaw = b.jawOpen || 0;
+  const s = {
+    happy:     clamp01(smile * g.happy),
+    sad:       clamp01((frown * 1.0 + browInner * 0.4 + (b.mouthShrugLower || 0) * 0.2) * g.sad),
+    angry:     clamp01((browDown * 0.9 + squint * 0.3 + sneer * 0.4 + press * 0.3) * g.angry),
+    surprised: clamp01((jaw * 0.5 + eyeWide * 0.6 + browOuter * 0.4 + browInner * 0.3) * g.surprised)
+  };
+  return s;
+}
+
+function updateFaces(res, W, H) {
+  const found = [];
+  res.faceLandmarks.forEach((lm, i) => {
+    let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+    for (const p of lm) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+    const w = (x1 - x0) * W, h = (y1 - y0) * H, padX = w * 0.06, padY = h * 0.1;
+    found.push({
+      x: x0 * W - padX, y: y0 * H - padY * 1.5, w: w + padX * 2, h: h + padY * 2.5,
+      scores: expressionScores(res.faceBlendshapes[i]?.categories || [])
+    });
+  });
+
+  const used = new Set();
+  for (const t of faceTracks) {
+    let best = -1, bestIou = 0.15;
+    found.forEach((d, i) => { if (used.has(i)) return; const o = iou(t, d); if (o > bestIou) { bestIou = o; best = i; } });
+    if (best >= 0) {
+      const d = found[best], k = 0.6, e = CONFIG.emotionSmoothing;
+      used.add(best);
+      t.x += (d.x - t.x) * k; t.y += (d.y - t.y) * k; t.w += (d.w - t.w) * k; t.h += (d.h - t.h) * k;
+      for (const key in d.scores) t.scores[key] += (d.scores[key] - t.scores[key]) * e;
+      t.missed = 0;
+    } else t.missed++;
+  }
+  found.forEach((d, i) => { if (!used.has(i)) faceTracks.push({ ...d, missed: 0 }); });
+  faceTracks = faceTracks.filter(t => t.missed <= 4);
+}
+
+function currentEmotion(t) {
+  let name = "neutral", val = 0;
+  for (const k in t.scores) if (t.scores[k] > val) { val = t.scores[k]; name = k; }
+  if (val < CONFIG.minEmotion) return { name: "neutral", strength: 1 - val };
+  return { name, strength: val };
+}
+
+// ---------- 3. Main loop ----------
+requestAnimationFrame(function loop() {
+  requestAnimationFrame(loop);
+  const ready = (!CONFIG.objects || objDetector) && (!CONFIG.faces || faceModel);
+  if (!ready || video.readyState < 2 || !video.videoWidth) return;
+  if (video.currentTime === lastVideoTime) return;            // no new frame from the phone yet
+  lastVideoTime = video.currentTime;
+
+  if (view.width !== video.videoWidth || view.height !== video.videoHeight) {
+    view.width = video.videoWidth; view.height = video.videoHeight;
+  }
+  vctx.drawImage(video, 0, 0, view.width, view.height);
+  const now = performance.now();
+
+  // Detect on the canvas (the upright picture you actually see)
+  if (CONFIG.objects && frameNo % CONFIG.detectEvery === 0) {
+    const minArea = CONFIG.minAreaFrac * view.width * view.height;
+    const dets = objDetector.detectForVideo(view, now).detections
+      .map(d => ({ x: d.boundingBox.originX, y: d.boundingBox.originY, w: d.boundingBox.width, h: d.boundingBox.height,
+                   name: d.categories[0].categoryName, score: d.categories[0].score }))
+      .filter(d => d.w * d.h >= minArea)
+      .filter(d => !CONFIG.ignore.includes(d.name))
+      .filter(d => !CONFIG.only.length || CONFIG.only.includes(d.name));
+    updateTracks(dets);
+  }
+  if (CONFIG.faces) updateFaces(faceModel.detectForVideo(view, now + 0.01), view.width, view.height);
+  frameNo++;
+
+  const s = view.width / 640;
+  vctx.lineJoin = "miter";
+
+  // Objects: big boxes first so small ones stay visible on top
+  const visible = tracks.filter(t => t.hits >= CONFIG.confirmFrames && t.missed <= 2).sort((a, b) => b.w * b.h - a.w * a.h);
+  for (const t of visible) {
+    vctx.lineWidth = CONFIG.lineWidth * s;
+    vctx.strokeStyle = t.color;
+    vctx.strokeRect(t.x, t.y, t.w, t.h);
+    const text = CONFIG.showScore ? `${t.name} ${Math.round(t.score * 100)}%` : t.name;
+    drawTag(text, t.x - CONFIG.lineWidth * s / 2, t.y + CONFIG.lineWidth * s / 2, t.color, s, false);
+  }
+
+  // Faces: box colored by expression, tag underneath the box (so it never collides with a "person" tag)
+  for (const t of faceTracks) {
+    if (t.missed > 1) continue;
+    const em = currentEmotion(t), info = EMOTIONS[em.name];
+    vctx.lineWidth = CONFIG.lineWidth * s;
+    vctx.strokeStyle = info.color;
+    vctx.strokeRect(t.x, t.y, t.w, t.h);
+    const pct = CONFIG.showPercent ? ` ${Math.round(em.strength * 100)}%` : "";
+    drawTag(`${info.icon} ${em.name}${pct}`, t.x - CONFIG.lineWidth * s / 2, t.y + t.h + CONFIG.lineWidth * s / 2, info.color, s, true);
+  }
+  present();
+});
+
+function present() {
+  const W = out.width, H = out.height;
+  octx.fillStyle = "#000"; octx.fillRect(0, 0, W, H);
+  const k = Math.min(W / view.width, H / view.height);
+  const dw = view.width * k, dh = view.height * k;
+  octx.drawImage(view, (W - dw) / 2, (H - dh) / 2, dw, dh);
+}
+</script>
+</body>
+</html>
