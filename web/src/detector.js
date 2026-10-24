@@ -1,19 +1,18 @@
-// Object detection with MediaPipe's EfficientDet-Lite2 (80 COCO classes: person, cup,
-// chair, laptop, ...), set up like object_recog.
+// Object detection with MediaPipe's EfficientDet (80 COCO classes: person, cup, chair,
+// laptop, ...), set up like object_recog.
 import { FilesetResolver, ObjectDetector } from '@mediapipe/tasks-vision';
 import { CONFIG } from './config.js';
 
 // The wasm files must match the npm package version.
 const WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
-// EfficientDet-Lite2 is more accurate than Lite0, at some speed cost.
-const MODEL =
-  'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/float16/1/efficientdet_lite2.tflite';
+const MODEL = (name) =>
+  `https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_${name}/float16/1/efficientdet_${name}.tflite`;
 
 export async function createDetector() {
   const fileset = await FilesetResolver.forVisionTasks(WASM);
   const make = (delegate) =>
     ObjectDetector.createFromOptions(fileset, {
-      baseOptions: { modelAssetPath: MODEL, delegate },
+      baseOptions: { modelAssetPath: MODEL(CONFIG.model), delegate },
       runningMode: 'VIDEO',
       scoreThreshold: CONFIG.score,
       maxResults: CONFIG.maxResults,
