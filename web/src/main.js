@@ -6,9 +6,9 @@ import { drawTag, drawTracks } from './draw.js';
 import { createFaceModel, currentEmotion, drawFaces, FaceTracker } from './faces.js';
 import { flickerFor, Glitch, GLITCH_GLSL, presentGlitched } from './glitch.js';
 import { startCamera } from './camera.js';
-import { drawStimuli, pickStimuli } from './stimuli.js';
+import { drawStimuli, pickStimuli, stimuli } from './stimuli.js';
 import { narrate } from './llm.js';
-import { clearSpeech, speak, stopSpeaking, unlockSpeech } from './speech.js';
+import { unlockAudio, Voice } from './voice.js';
 
 const CALIBRATION_KEY = 'overlayCalibration';
 const CALIBRATION_FIELDS = ['cameraHFov', 'cameraYaw', 'cameraPitch', 'cameraLatencyMs'];
@@ -77,7 +77,7 @@ const isPhone = /Android|iPhone|iPad/.test(navigator.userAgent) && !/OculusBrows
 $('start-camera').addEventListener('click', async () => {
   const button = $('start-camera');
   button.disabled = true;
-  unlockSpeech();
+  unlockAudio();
   try {
     msg('Starting camera…');
     video = await startCamera();
@@ -146,21 +146,31 @@ function present() {
 // --- Asking about objects --------------------------------------------------
 
 // Whatever you look at for CONFIG.dwellMs (a box, or with CONFIG.describeScene the whole
-// scene when you look at no box) starts a narration: a crop goes to the LLM, which keeps
-// talking about it, searching the web for more, for as long as you keep looking. Settling
-// on something else for CONFIG.switchMs switches to it: the sentence being spoken finishes,
-// the queued ones are dropped, and the new target starts over.
+// scene when you look at no box) starts the main narration: a crop goes to the LLM, which
+// keeps talking about it, searching the web for more, for as long as you keep looking.
+// Settling on something else for CONFIG.switchMs switches to it: the sentence being spoken
+// finishes, the queued ones are dropped, and the new target starts over.
+// With the stimuli slider high, the biggest other shown boxes get narrations of their own
+// at the same time (see maxNarrations). Each narration has its own voice, panned and set
+// in volume by where its box is (see placeVoices).
 // Where boxes overlap, lookedAt() picks the smallest.
 let gazeId = null; // what the gaze is on now: a track id, 'scene', or null
 let gazeSince = 0;
-let session = null; // { id, name, box, abort, waiting } while narrating
-let finishedId = null; // a narration that ran out of things to say isn't restarted until you look away
+let primary = null; // the narration of what you look at
+let extras = []; // narrations of other boxes
+// A narration: { id, trackId, name, box, voice, abort, waiting, done, lostAt }
+
+const maxNarrations = () => (stimuli.percent >= 80 ? 3 : stimuli.percent >= 50 ? 2 : 1);
+const narrations = () => (primary ? [primary, ...extras] : extras);
 
 // The tracker sometimes loses a box and finds it again under a new id; a box of the same
 // kind where the narrated one was still counts as the narrated object.
+const matches = (track, n) =>
+  track.id === n.trackId || (n.box && track.name === n.name && iou(track, n.box) > 0.3);
+
 function gazeTarget(track) {
   if (!track) return CONFIG.describeScene ? 'scene' : null;
-  if (session?.box && track.name === session.name && iou(track, session.box) > 0.3) return session.id;
+  if (primary && matches(track, primary)) return primary.id;
   return track.id;
 }
 
@@ -169,55 +179,123 @@ function updateGaze(track, now) {
   if (id !== gazeId) {
     gazeId = id;
     gazeSince = now;
-    finishedId = null;
   }
-  if (!CONFIG.ask || id === (session?.id ?? null) || id === finishedId) return;
-  if (now - gazeSince < (session ? CONFIG.switchMs : CONFIG.dwellMs)) return;
-  if (id === null) stopSession();
-  else startSession(id, track);
+  if (!CONFIG.ask || id === (primary?.id ?? null)) return;
+  if (now - gazeSince < (primary && !primary.done ? CONFIG.switchMs : CONFIG.dwellMs)) return;
+  stopNarration(primary);
+  primary = null;
+  if (id === null) return;
+  // A box that already has a narration of its own carries on as the main one.
+  const extra = track && extras.find((n) => matches(track, n));
+  if (extra) {
+    extras = extras.filter((n) => n !== extra);
+    extra.id = id;
+    primary = extra;
+  } else primary = startNarration(id, track);
+}
+
+// Keeps the extra narrations on the biggest shown boxes, up to maxNarrations() - 1. A box
+// must have been around for CONFIG.dwellMs to get one, and one that drops out of the
+// biggest for CONFIG.switchMs loses it.
+function updateExtras(now) {
+  const want = CONFIG.ask ? maxNarrations() - 1 : 0;
+  for (const t of tracks) t.seenAt ??= now;
+  const candidates = pickStimuli(tracks)
+    .filter((t) => !(primary && matches(t, primary)) && now - t.seenAt >= CONFIG.dwellMs)
+    .sort((a, b) => b.w * b.h - a.w * a.h)
+    .slice(0, want);
+  for (const n of extras) n.lostAt = candidates.some((t) => matches(t, n)) ? 0 : n.lostAt || now;
+  extras = extras.filter((n, i) => {
+    const keep = i < want && !(n.lostAt && now - n.lostAt > CONFIG.switchMs);
+    if (!keep) stopNarration(n);
+    return keep;
+  });
+  for (const t of candidates) {
+    if (extras.length >= want) break;
+    if (!extras.some((n) => matches(t, n))) extras.push(startNarration(t.id, t));
+  }
+}
+
+// Pan from how far left or right of the gaze centre a box is; volume from its size (bigger
+// is nearer, so louder), lowered the further it is from the centre. centre is in camera
+// picture coordinates (0..1).
+function placeVoices(centre) {
+  for (const n of narrations()) {
+    const t = n.trackId != null && tracks.find((t) => matches(t, n));
+    if (t) {
+      n.trackId = t.id;
+      n.box = { x: t.x, y: t.y, w: t.w, h: t.h };
+    }
+    if (!n.box) {
+      n.voice.place(0, 1); // the whole scene
+      continue;
+    }
+    const du = n.box.x + n.box.w / 2 - centre.u;
+    const dv = n.box.y + n.box.h / 2 - centre.v;
+    const size = THREE.MathUtils.clamp(Math.sqrt(n.box.w * n.box.h) * 2.5, 0.3, 1);
+    const off = Math.min(1, Math.hypot(du, dv) / 0.6);
+    n.voice.place(THREE.MathUtils.clamp(du / 0.4, -1, 1), size * (1 - 0.6 * off));
+  }
 }
 
 // Cancels the LLM request and drops the queued sentences; the sentence being spoken
 // finishes, unless hard is set (leaving AR).
-function stopSession(hard = false) {
-  session?.abort.abort();
-  session = null;
-  if (hard) stopSpeaking();
-  else clearSpeech();
+function stopNarration(n, hard = false) {
+  if (!n) return;
+  n.abort.abort();
+  if (hard) n.voice.stop();
+  else n.voice.clear();
+  n.voice.release();
 }
 
-async function startSession(id, track) {
-  stopSession();
-  const box = track && { x: track.x, y: track.y, w: track.w, h: track.h };
-  const s = { id, name: track?.name ?? 'the scene', box, abort: new AbortController(), waiting: true };
-  session = s;
+function stopAllNarrations() {
+  for (const n of narrations()) stopNarration(n, true);
+  primary = null;
+  extras = [];
+}
+
+function startNarration(id, track) {
+  const n = {
+    id,
+    trackId: track?.id ?? null,
+    name: track?.name ?? 'the scene',
+    box: track && { x: track.x, y: track.y, w: track.w, h: track.h },
+    voice: new Voice(),
+    abort: new AbortController(),
+    waiting: true,
+    done: false,
+    lostAt: 0,
+  };
+  runNarration(n, track);
+  return n;
+}
+
+async function runNarration(n, track) {
   const image = cropOf(track ?? { x: 0, y: 0, w: 1, h: 1 });
   // While one turn is spoken the next is generated, but no further ahead than that.
   let lastSentence = Promise.resolve();
   let previousTurn = Promise.resolve();
   try {
-    msg(`Looking at ${s.name}…`);
-    for await (const part of narrate(image, track?.name ?? null, s.abort.signal)) {
-      if (session !== s) break;
+    msg(`Looking at ${n.name}…`);
+    for await (const part of narrate(image, track?.name ?? null, n.abort.signal)) {
+      if (n.abort.signal.aborted) break;
       if (part.end) {
         await previousTurn;
         previousTurn = lastSentence;
         continue;
       }
-      s.waiting = false;
-      console.log(`[llm] ${s.name}:`, part.sentence);
+      n.waiting = false;
+      console.log(`[llm] ${n.name} (${n.voice.name}):`, part.sentence);
       msg(part.sentence);
-      lastSentence = speak(part.sentence, CONFIG.speechLang);
+      lastSentence = n.voice.say(part.sentence);
     }
   } catch (err) {
-    if (s.abort.signal.aborted) return;
+    if (n.abort.signal.aborted) return;
     console.error(err);
     msg(`LLM error: ${err.message}`);
   }
-  if (session === s) {
-    session = null;
-    finishedId = s.id;
-  }
+  // Ran out of things to say: it stays (silent) until you look away, so it isn't restarted.
+  if (!n.abort.signal.aborted) n.done = true;
 }
 
 // The box (plus a margin) cut out of the full-resolution camera picture, as a JPEG data URL.
@@ -237,11 +315,12 @@ function cropOf(t) {
   return crop.toDataURL('image/jpeg', 0.85);
 }
 
-// "thinking about cup…" at the top of the picture until the first sentence arrives.
+// "thinking about cup…" at the top of the picture until a narration's first sentence arrives.
 function drawAsking(ctx, w) {
-  if (!session?.waiting) return;
+  const names = narrations().filter((n) => n.waiting && !n.done && !n.abort.signal.aborted).map((n) => n.name);
+  if (!names.length) return;
   const fs = Math.max(14, 22 * (w / 640));
-  drawTag(ctx, `thinking about ${session.name}…`, fs, fs, fs, '#ffffff');
+  drawTag(ctx, `thinking about ${names.join(', ')}…`, fs, fs, fs, '#ffffff');
 }
 
 // --- AR view ----------------------------------------------------------------
@@ -525,7 +604,7 @@ if (!isPhone) {
 }
 
 arButton.addEventListener('click', async () => {
-  unlockSpeech();
+  unlockAudio();
   try {
     await renderer.xr.setSession(await navigator.xr.requestSession('immersive-ar'));
   } catch (err) {
@@ -540,7 +619,7 @@ renderer.xr.addEventListener('sessionend', () => {
   hasCapture = false;
   headHistory.length = 0;
   if (calibrating) toggleCalibration();
-  stopSession(true);
+  stopAllNarrations();
   gazeId = null;
   $('panel').hidden = false;
 });
@@ -566,7 +645,11 @@ renderer.setAnimationLoop((time, xrFrame) => {
 
   if (!renderer.xr.isPresenting) {
     // On the flat screen there's no head, so "looking at" means the centre of the picture.
-    if (video) updateGaze(lookedAt({ u: 0.5, v: 0.5 }), now);
+    if (video) {
+      updateGaze(lookedAt({ u: 0.5, v: 0.5 }), now);
+      updateExtras(now);
+      placeVoices({ u: 0.5, v: 0.5 });
+    }
     if (detected) {
       drawView();
       present();
@@ -589,8 +672,11 @@ renderer.setAnimationLoop((time, xrFrame) => {
     u.time.value = now / 1000;
     u.glitchParts.value.set(+CONFIG.glitch.slices, +CONFIG.glitch.scanlines, +CONFIG.glitch.noise);
     flickerFor(u.glitch.value, dt, u.flicker.value);
-    const looked = lookedAt(viewCentre());
+    const centre = viewCentre();
+    const looked = lookedAt(centre);
     updateGaze(looked, now);
+    updateExtras(now);
+    placeVoices(centre);
     ring.material.uniforms.color.value.setStyle(looked?.color ?? '#ff2020', THREE.LinearSRGBColorSpace);
     if (arView.material.uniforms.opacity.value > 0) uploadVideoFrame();
     if (detected || changed || calibrating) drawBoxes();
