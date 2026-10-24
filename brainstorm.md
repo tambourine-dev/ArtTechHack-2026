@@ -24,6 +24,30 @@
 - experience shouldnt convey any feelings/morals one should feel, ppl should figure out themselves how they feel abt sth --> should be neutral
 - experience shouldnt be hardcoded but generative, e.g. you can change amount of tracking by slider, some kind of input
 - 2 people involved, one party experiences with vr and the other is in control
+- Baum
+- Zeichnen mit Licht 
+- glimpses of social disaproval
+
+## Topics
+
+- State surveillance
+- Impact of Technology on Emotions
+- Axienty, Consciousness
+- Information overload
+- 
+
+## Mentor List
+
+- Leonel Aguilar: Data science & cognitive science (ETH)
+- Lina Lopes: Creative technology
+- Philippe Kocher: Music theory, composition, computer music (ZHdK)
+- Glody Figueiredo: LLM/ AI support
+- Martin Fröhlich:	Immersive technologies
+
+## Pipeline
+
+- AR
+- LLM that takes visual imputs and generates audio / text outputs
 
 # Brainstorm refinment
 - person mit vr brille als ueberwachungsinstanz
@@ -33,3 +57,7 @@
 - werbung im field of view (kapitalismus)
 - tisch in alle informationen zerleit (wissenschaftlich)
 - falsche realitaet / vater in anderem raum
+
+- informative anzeigen im AR.
+  - Am anfang noch sehr informativ.
+  - desto spaeter desto mehr werbung
