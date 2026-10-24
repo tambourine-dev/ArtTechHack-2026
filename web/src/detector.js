@@ -8,20 +8,28 @@ const WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
 const MODEL = (name) =>
   `https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_${name}/float16/1/efficientdet_${name}.tflite`;
 
-export async function createDetector() {
-  const fileset = await FilesetResolver.forVisionTasks(WASM);
-  const make = (delegate) =>
-    ObjectDetector.createFromOptions(fileset, {
-      baseOptions: { modelAssetPath: MODEL(CONFIG.model), delegate },
-      runningMode: 'VIDEO',
-      scoreThreshold: CONFIG.score,
-      maxResults: CONFIG.maxResults,
-    });
+// The wasm runtime, shared by the object detector and the face model.
+let fileset = null;
+export const visionFileset = () => (fileset ??= FilesetResolver.forVisionTasks(WASM));
+
+export async function withGpuFallback(make) {
   try {
     return await make('GPU');
   } catch {
     return make('CPU');
   }
+}
+
+export async function createDetector() {
+  const files = await visionFileset();
+  return withGpuFallback((delegate) =>
+    ObjectDetector.createFromOptions(files, {
+      baseOptions: { modelAssetPath: MODEL(CONFIG.model), delegate },
+      runningMode: 'VIDEO',
+      scoreThreshold: CONFIG.score,
+      maxResults: CONFIG.maxResults,
+    }),
+  );
 }
 
 // Runs the detector on one frame and returns the boxes in normalised coordinates (0..1),

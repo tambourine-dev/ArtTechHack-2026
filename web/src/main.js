@@ -3,6 +3,8 @@ import { CONFIG } from './config.js';
 import { createDetector, detect } from './detector.js';
 import { Tracker } from './tracker.js';
 import { drawTracks } from './draw.js';
+import { createFaceModel, currentEmotion, drawFaces, FaceTracker } from './faces.js';
+import { flickerFor, Glitch, GLITCH_GLSL, presentGlitched } from './glitch.js';
 import { startCamera } from './camera.js';
 
 const CALIBRATION_KEY = 'overlayCalibration';
@@ -18,12 +20,17 @@ const msg = (text) => ($('msg').textContent = text);
 // --- Detection --------------------------------------------------------------
 
 let detector = null;
+let faceModel = null;
 let video = null;
 let lastVideoTime = -1;
 let lastDetect = 0;
 let detectMs = 0;
+let frameNo = 0;
 let tracks = [];
+let faces = [];
 const tracker = new Tracker();
+const faceTracker = new FaceTracker();
+const glitch = new Glitch();
 
 // The picture the detector sees, scaled down to CONFIG.detectWidth.
 const frame = document.createElement('canvas');
@@ -36,16 +43,29 @@ const vctx = view.getContext('2d');
 const out = $('view');
 const octx = out.getContext('2d');
 
-createDetector().then(
-  (d) => {
-    detector = d;
-    msg(video ? 'Object model ready.' : 'Object model ready. Start the camera.');
-  },
+Promise.all([
+  CONFIG.objects && createDetector().then((d) => (detector = d)),
+  CONFIG.faces && createFaceModel().then((m) => (faceModel = m)),
+]).then(
+  () => msg(video ? 'Models ready.' : 'Models ready. Start the camera.'),
   (err) => {
     console.error(err);
     msg(`Model error: ${err.message}`);
   },
 );
+
+const angryFace = () => faces.some((t) => currentEmotion(t).name === 'angry');
+const glitchStrength = (dt) => glitch.strength(dt, tracks.length + faces.length, angryFace());
+
+// Keyboard (flat screen): C = calibrate faces (hold a relaxed face), R = reset that,
+// M = face mesh on/off, G = glitch on/off. In AR: X and Y on the left controller.
+addEventListener('keydown', (e) => {
+  const key = e.key.toLowerCase();
+  if (key === 'c') faceTracker.calibrate();
+  if (key === 'r') faceTracker.resetCalibration();
+  if (key === 'm') CONFIG.mesh = !CONFIG.mesh;
+  if (key === 'g') CONFIG.glitch.on = !CONFIG.glitch.on;
+});
 
 // Phones show the camera picture full screen with the boxes, which lines up exactly with
 // what you see. Headsets (Quest) also get "Start AR", with the boxes over the passthrough.
@@ -68,9 +88,10 @@ $('start-camera').addEventListener('click', async () => {
   }
 });
 
-// Detects on every new camera frame (or at most every CONFIG.detectEveryMs).
+// Runs the models on every new camera frame (or at most every CONFIG.detectEveryMs): faces
+// every frame, objects every CONFIG.objectEvery frames.
 function runDetection() {
-  if (!detector || !video || video.readyState < 2 || !video.videoWidth) return false;
+  if ((!detector && !faceModel) || !video || video.readyState < 2 || !video.videoWidth) return false;
   if (video.currentTime === lastVideoTime) return false; // no new camera frame yet
   if (performance.now() - lastDetect < CONFIG.detectEveryMs) return false;
   lastVideoTime = video.currentTime;
@@ -84,13 +105,20 @@ function runDetection() {
   }
   fctx.drawImage(video, 0, 0, fw, fh);
   const start = performance.now();
-  tracker.update(detect(detector, frame, fw, fh));
+  if (detector && frameNo % CONFIG.objectEvery === 0) {
+    if (tracker.update(detect(detector, frame, fw, fh)) > 0) glitch.bump(0.3);
+    tracks = tracker.visible();
+  }
+  if (faceModel) {
+    faceTracker.update(faceModel.detectForVideo(frame, performance.now()), (v) => glitch.bump(v));
+    faces = faceTracker.visible();
+  }
+  frameNo++;
   detectMs += (performance.now() - start - detectMs) * 0.2;
-  tracks = tracker.visible();
   return true;
 }
 
-// The camera picture with the boxes, for the flat screen.
+// The camera picture with the boxes and faces, for the flat screen.
 function drawView() {
   if (view.width !== video.videoWidth || view.height !== video.videoHeight) {
     view.width = video.videoWidth;
@@ -98,18 +126,15 @@ function drawView() {
   }
   vctx.drawImage(video, 0, 0, view.width, view.height);
   drawTracks(vctx, tracks, view.width, view.height);
+  drawFaces(vctx, faces, view.width, view.height);
 }
 
-// Fits the composed frame into the window.
+// Fits the composed frame into the window, with the glitch on top.
+let lastPresent = performance.now();
 function present() {
-  const W = out.width;
-  const H = out.height;
-  octx.fillStyle = '#000';
-  octx.fillRect(0, 0, W, H);
-  const k = Math.min(W / view.width, H / view.height);
-  const dw = view.width * k;
-  const dh = view.height * k;
-  octx.drawImage(view, (W - dw) / 2, (H - dh) / 2, dw, dh);
+  const now = performance.now();
+  presentGlitched(octx, out, view, glitchStrength((now - lastPresent) / 1000));
+  lastPresent = now;
 }
 
 // --- AR view ----------------------------------------------------------------
@@ -145,7 +170,15 @@ let lastUploadTime = -1;
 const arView = new THREE.Mesh(
   new THREE.PlaneGeometry(1, 1),
   new THREE.ShaderMaterial({
-    uniforms: { videoMap: { value: null }, boxMap: { value: boxTexture }, opacity: { value: 1 } },
+    uniforms: {
+      videoMap: { value: null },
+      boxMap: { value: boxTexture },
+      opacity: { value: 1 },
+      glitch: { value: 0 },
+      time: { value: 0 },
+      glitchParts: { value: new THREE.Vector3() },
+      flicker: { value: new THREE.Vector4() },
+    },
     vertexShader: /* glsl */ `
       varying vec2 vUv;
       void main() {
@@ -157,10 +190,17 @@ const arView = new THREE.Mesh(
       uniform sampler2D boxMap;
       uniform float opacity;
       varying vec2 vUv;
+      // The picture (camera in setup mode, boxes and faces on top), premultiplied.
+      vec4 layer(vec2 uv) {
+        vec4 v = texture2D(videoMap, uv);
+        vec4 b = texture2D(boxMap, uv);
+        float a = max(opacity, b.a);
+        return vec4(mix(v.rgb, b.rgb, b.a) * a, a);
+      }
+      ${GLITCH_GLSL}
       void main() {
-        vec4 v = texture2D(videoMap, vUv);
-        vec4 b = texture2D(boxMap, vUv);
-        gl_FragColor = vec4(mix(v.rgb, b.rgb, b.a), max(opacity, b.a));
+        vec4 c = glitched(vUv);
+        gl_FragColor = c.a > 0.0 ? vec4(c.rgb / c.a, c.a) : vec4(0.0);
       }`,
     transparent: true,
     depthTest: false,
@@ -272,6 +312,7 @@ function drawBoxes() {
   }
   boxCtx.clearRect(0, 0, W, H);
   drawTracks(boxCtx, tracks, W, H);
+  drawFaces(boxCtx, faces, W, H);
 
   if (calibrating) {
     const text =
@@ -314,7 +355,16 @@ function uploadVideoFrame() {
 // Left thumbstick left/right sets the camera lag: shake your head and tune it until the
 // picture stays put on the room instead of swinging after it.
 let calibrating = false;
-let aWasPressed = false;
+const wasPressed = {};
+
+// True only on the frame a controller button goes down.
+function pressedOnce(input, index) {
+  const key = `${input.handedness}${index}`;
+  const pressed = input.gamepad.buttons[index]?.pressed ?? false;
+  const once = pressed && !wasPressed[key];
+  wasPressed[key] = pressed;
+  return once;
+}
 
 function updateCalibration(frame, dt) {
   let changed = false;
@@ -323,19 +373,22 @@ function updateCalibration(frame, dt) {
     if (!pad) continue;
     const [, , ax = 0, ay = 0] = pad.axes;
     if (input.handedness === 'right') {
-      const aPressed = pad.buttons[4]?.pressed ?? false;
-      if (aPressed && !aWasPressed) {
+      if (pressedOnce(input, 4)) {
         toggleCalibration();
         changed = true;
       }
-      aWasPressed = aPressed;
       if (calibrating && Math.abs(ax) > 0.2) CONFIG.cameraYaw += ax * dt * 6;
       if (calibrating && Math.abs(ay) > 0.2) CONFIG.cameraPitch -= ay * dt * 6;
       changed ||= calibrating && (Math.abs(ax) > 0.2 || Math.abs(ay) > 0.2);
-    } else if (input.handedness === 'left' && calibrating) {
-      if (Math.abs(ay) > 0.2) CONFIG.cameraHFov = THREE.MathUtils.clamp(CONFIG.cameraHFov - ay * dt * 10, 30, 130);
-      if (Math.abs(ax) > 0.2) CONFIG.cameraLatencyMs = THREE.MathUtils.clamp(CONFIG.cameraLatencyMs + ax * dt * 60, 0, 400);
-      changed ||= Math.abs(ax) > 0.2 || Math.abs(ay) > 0.2;
+    } else if (input.handedness === 'left') {
+      // X = calibrate faces (hold a relaxed face), Y = glitch on/off.
+      if (pressedOnce(input, 4)) faceTracker.calibrate();
+      if (pressedOnce(input, 5)) CONFIG.glitch.on = !CONFIG.glitch.on;
+      if (calibrating) {
+        if (Math.abs(ay) > 0.2) CONFIG.cameraHFov = THREE.MathUtils.clamp(CONFIG.cameraHFov - ay * dt * 10, 30, 130);
+        if (Math.abs(ax) > 0.2) CONFIG.cameraLatencyMs = THREE.MathUtils.clamp(CONFIG.cameraLatencyMs + ax * dt * 60, 0, 400);
+        changed ||= Math.abs(ax) > 0.2 || Math.abs(ay) > 0.2;
+      }
     }
   }
   arView.material.uniforms.opacity.value = calibrating ? 0.5 : CONFIG.arShowCamera ? 1 : 0;
@@ -417,6 +470,11 @@ renderer.setAnimationLoop((time, xrFrame) => {
     }
     const changed = updateCalibration(xrFrame, dt);
     layoutARView();
+    const u = arView.material.uniforms;
+    u.glitch.value = glitchStrength(dt);
+    u.time.value = now / 1000;
+    u.glitchParts.value.set(+CONFIG.glitch.slices, +CONFIG.glitch.scanlines, +CONFIG.glitch.noise);
+    flickerFor(u.glitch.value, dt, u.flicker.value);
     ring.material.uniforms.color.value.setStyle(lookedAt(viewCentre())?.color ?? '#ff2020', THREE.LinearSRGBColorSpace);
     if (arView.material.uniforms.opacity.value > 0) uploadVideoFrame();
     if (detected || changed || calibrating) drawBoxes();

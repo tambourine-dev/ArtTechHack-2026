@@ -7,6 +7,7 @@ export class Tracker {
   tracks = [];
   #nextId = 1;
 
+  // Returns how many new objects appeared.
   update(dets) {
     const used = new Set();
     for (const t of this.tracks) {
@@ -33,10 +34,14 @@ export class Tracker {
         t.missed = 0;
       } else t.missed++;
     }
+    let added = 0;
     dets.forEach((d, i) => {
-      if (!used.has(i)) this.tracks.push({ id: this.#nextId++, ...d, hits: 1, missed: 0, color: colorFor(d.name) });
+      if (used.has(i)) return;
+      this.tracks.push({ id: this.#nextId++, ...d, hits: 1, missed: 0, color: colorFor(d.name) });
+      added++;
     });
     this.tracks = this.tracks.filter((t) => t.missed <= CONFIG.keepFrames);
+    return added;
   }
 
   // Confirmed boxes, big ones first so small ones are drawn on top.
@@ -58,7 +63,7 @@ function colorFor(name) {
   return CONFIG.palette[h % CONFIG.palette.length];
 }
 
-function iou(a, b) {
+export function iou(a, b) {
   const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
   const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
   if (w <= 0 || h <= 0) return 0;
