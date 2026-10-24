@@ -30,10 +30,16 @@ export const CONFIG = {
   gain: { happy: 1.6, sad: 1.8, angry: 1.5, surprised: 1.3 },
 
   // Face mesh (M key)
-  mesh: true,
+  mesh: false,
   meshOpacity: 0.35,     // brightness of the full 468-point wireframe (0..1)
   meshDots: true,        // draw a dot on every landmark; the dots swell when the expression changes
   meshGlow: true,        // glow on the eyes, brows, lips and face outline
+
+  // Asking the LLM about what you look at
+  ask: true,
+  dwellMs: 1000,         // how long you have to look at a box before it's asked about
+  askImageSize: 512,     // the crop sent to the LLM is scaled to this many pixels on its longest side
+  speechLang: 'en-US',   // voice language of the browser's text to speech
 
   // Glitch effect (G key, or Y on the left controller in AR). Applied to what you see only,
   // never to what the models analyse. In AR it affects the boxes and mesh, not the passthrough.

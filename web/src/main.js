@@ -2,10 +2,12 @@ import * as THREE from 'three';
 import { CONFIG } from './config.js';
 import { createDetector, detect } from './detector.js';
 import { Tracker } from './tracker.js';
-import { drawTracks } from './draw.js';
+import { drawTag, drawTracks } from './draw.js';
 import { createFaceModel, currentEmotion, drawFaces, FaceTracker } from './faces.js';
 import { flickerFor, Glitch, GLITCH_GLSL, presentGlitched } from './glitch.js';
 import { startCamera } from './camera.js';
+import { describeObject } from './llm.js';
+import { say, unlockSpeech } from './speech.js';
 
 const CALIBRATION_KEY = 'overlayCalibration';
 const CALIBRATION_FIELDS = ['cameraHFov', 'cameraYaw', 'cameraPitch', 'cameraLatencyMs'];
@@ -74,6 +76,7 @@ const isPhone = /Android|iPhone|iPad/.test(navigator.userAgent) && !/OculusBrows
 $('start-camera').addEventListener('click', async () => {
   const button = $('start-camera');
   button.disabled = true;
+  unlockSpeech();
   try {
     msg('Starting camera…');
     video = await startCamera();
@@ -127,6 +130,7 @@ function drawView() {
   vctx.drawImage(video, 0, 0, view.width, view.height);
   drawTracks(vctx, tracks, view.width, view.height);
   drawFaces(vctx, faces, view.width, view.height);
+  drawAsking(vctx, view.width);
 }
 
 // Fits the composed frame into the window, with the glitch on top.
@@ -135,6 +139,66 @@ function present() {
   const now = performance.now();
   presentGlitched(octx, out, view, glitchStrength((now - lastPresent) / 1000));
   lastPresent = now;
+}
+
+// --- Asking about objects --------------------------------------------------
+
+// Looking at the same box for CONFIG.dwellMs sends a crop of it to the LLM, which can search
+// the web, and its answer is spoken. One question at a time, and a box isn't asked about
+// again until you've looked away from it. Where boxes overlap, lookedAt() picks the smallest.
+let gazeTrack = null;
+let gazeSince = 0;
+let askedId = null;
+let asking = null; // { name, speaking } while the LLM thinks or the answer is spoken
+
+function updateGaze(track, now) {
+  if (track?.id !== gazeTrack?.id) {
+    gazeTrack = track;
+    gazeSince = now;
+    askedId = null;
+  }
+  if (CONFIG.ask && track && !asking && track.id !== askedId && now - gazeSince >= CONFIG.dwellMs) ask(track);
+}
+
+async function ask(track) {
+  askedId = track.id;
+  asking = { name: track.name, speaking: false };
+  try {
+    msg(`Looking up ${track.name}…`);
+    const text = await describeObject(cropOf(track), track.name);
+    console.log('[llm]', text);
+    msg(text || `No answer about ${track.name}.`);
+    asking.speaking = true;
+    await say(text, CONFIG.speechLang);
+  } catch (err) {
+    console.error(err);
+    msg(`LLM error: ${err.message}`);
+  }
+  asking = null;
+}
+
+// The box (plus a margin) cut out of the full-resolution camera picture, as a JPEG data URL.
+const crop = document.createElement('canvas');
+function cropOf(t) {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  const pad = 0.1;
+  const x0 = Math.max(0, (t.x - t.w * pad) * vw);
+  const y0 = Math.max(0, (t.y - t.h * pad) * vh);
+  const x1 = Math.min(vw, (t.x + t.w * (1 + pad)) * vw);
+  const y1 = Math.min(vh, (t.y + t.h * (1 + pad)) * vh);
+  const s = CONFIG.askImageSize / Math.max(x1 - x0, y1 - y0, 1);
+  crop.width = Math.max(1, Math.round((x1 - x0) * s));
+  crop.height = Math.max(1, Math.round((y1 - y0) * s));
+  crop.getContext('2d').drawImage(video, x0, y0, x1 - x0, y1 - y0, 0, 0, crop.width, crop.height);
+  return crop.toDataURL('image/jpeg', 0.85);
+}
+
+// "thinking about cup…" at the top of the picture while the LLM works.
+function drawAsking(ctx, w) {
+  if (!asking || asking.speaking) return;
+  const fs = Math.max(14, 22 * (w / 640));
+  drawTag(ctx, `thinking about ${asking.name}…`, fs, fs, fs, '#ffffff');
 }
 
 // --- AR view ----------------------------------------------------------------
@@ -313,6 +377,7 @@ function drawBoxes() {
   boxCtx.clearRect(0, 0, W, H);
   drawTracks(boxCtx, tracks, W, H);
   drawFaces(boxCtx, faces, W, H);
+  drawAsking(boxCtx, W);
 
   if (calibrating) {
     const text =
@@ -416,6 +481,7 @@ if (!isPhone) {
 }
 
 arButton.addEventListener('click', async () => {
+  unlockSpeech();
   try {
     await renderer.xr.setSession(await navigator.xr.requestSession('immersive-ar'));
   } catch (err) {
@@ -453,6 +519,8 @@ renderer.setAnimationLoop((time, xrFrame) => {
   const detected = runDetection();
 
   if (!renderer.xr.isPresenting) {
+    // On the flat screen there's no head, so "looking at" means the centre of the picture.
+    if (video) updateGaze(lookedAt({ u: 0.5, v: 0.5 }), now);
     if (detected) {
       drawView();
       present();
@@ -475,7 +543,9 @@ renderer.setAnimationLoop((time, xrFrame) => {
     u.time.value = now / 1000;
     u.glitchParts.value.set(+CONFIG.glitch.slices, +CONFIG.glitch.scanlines, +CONFIG.glitch.noise);
     flickerFor(u.glitch.value, dt, u.flicker.value);
-    ring.material.uniforms.color.value.setStyle(lookedAt(viewCentre())?.color ?? '#ff2020', THREE.LinearSRGBColorSpace);
+    const looked = lookedAt(viewCentre());
+    updateGaze(looked, now);
+    ring.material.uniforms.color.value.setStyle(looked?.color ?? '#ff2020', THREE.LinearSRGBColorSpace);
     if (arView.material.uniforms.opacity.value > 0) uploadVideoFrame();
     if (detected || changed || calibrating) drawBoxes();
   }
