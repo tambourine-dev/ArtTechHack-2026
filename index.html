@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pointing viewer</title>
+<title>Object viewer</title>
 <style>
   html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,sans-serif;color:#fff}
   canvas{position:fixed;inset:0;width:100%;height:100%}
@@ -22,35 +22,39 @@
   <h2 id="title">Waiting for the phone...</h2>
   <div>Code: <span id="code">----</span></div>
   <p>On the phone, open:<br><span id="link"></span></p>
-  <p id="msg">Loading hand model...</p>
+  <p id="msg">Loading object model...</p>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script type="module">
-import { HandLandmarker, FilesetResolver }
+import { ObjectDetector, FilesetResolver }
   from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
 // ---------- Config ----------
 const CONFIG = {
-  handConfidence: 0.35,       // lower = finds hands more easily (default is 0.5), but may see hands that aren't there
-  smoothMinCutoff: 2.5,       // smoothing of the aim point at rest: lower = steadier but slower to follow
-  smoothBeta: 0.05,           // higher = smoothing relaxes faster when your hand moves quickly
-  fingerBendDeg: 140,         // a finger bent more than this (at its middle knuckle) counts as curled
-  pinchRatio: 0.3,            // thumb-index gap compared with palm size that counts as a pinch
-  dotDistance: 0.3,           // how far past the fingertip the red dot sits (fraction of frame width); 0 = right at the fingertip
-  keepMs: 250,                // keep the dot this long after you stop pointing (stops flicker)
-  dotColor: "#ff2020"
+  score: 0.4,            // minimum confidence (0..1). Lower = more boxes, higher = cleaner
+  maxResults: 25,
+  minAreaFrac: 0.0006,   // ignore boxes smaller than this fraction of the picture (removes specks)
+  ignore: [],            // categories to hide, e.g. ["person", "chair"]
+  only: [],              // if not empty, show ONLY these categories, e.g. ["cup", "bottle"]
+  showScore: false,      // true = "cup 87%"
+  smoothing: 0.45,       // how fast boxes follow movement (0..1): higher = snappier, lower = steadier
+  confirmFrames: 2,      // a box must be seen this many times before it appears (stops flicker)
+  keepFrames: 5,         // a box stays this many frames after the object disappears
+  matchIou: 0.3,         // how much a new detection must overlap an old box to be "the same object"
+  lineWidth: 3,          // box thickness (scales with picture size)
+  palette: ["#66ff44", "#ff33ff", "#2b2bff", "#ffee33", "#33aaff", "#ff9933", "#33ffcc", "#ff4466", "#aa66ff", "#ccff33"]
 };
 const PREFIX = "handpoint-";                                  // must match phone-sender.html
 const BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
-const HAND_MODEL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+// EfficientDet-Lite2 is more accurate than Lite0 (the one used before)
+const OBJ_MODEL = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/float16/1/efficientdet_lite2.tflite";
 
 // ---------- Setup ----------
 const $ = id => document.getElementById(id);
 const video = $("video"), out = $("out"), octx = out.getContext("2d");
-const view = document.createElement("canvas"), vctx = view.getContext("2d");   // video + overlays
-let handModel, lastVideoTime = -1;
-const tracks = {};                                            // per-hand smoothing, gesture history and dot
+const view = document.createElement("canvas"), vctx = view.getContext("2d");   // upright video + overlays
+let detector, lastVideoTime = -1, tracks = [], nextId = 1;
 
 const msg = t => { $("msg").textContent = t; };
 function resize() { out.width = innerWidth * devicePixelRatio; out.height = innerHeight * devicePixelRatio; }
@@ -68,11 +72,11 @@ function startPeer() {
     $("link").textContent = new URL("phone-sender.html", location.href).href + "?code=" + code;
   });
   peer.on("error", e => {
-    if (e.type === "unavailable-id") { peer.destroy(); startPeer(); }   // code already taken: pick another
+    if (e.type === "unavailable-id") { peer.destroy(); startPeer(); }
     else msg("Connection error: " + e.type);
   });
   peer.on("call", call => {
-    call.answer();                                            // we only receive, we send nothing back
+    call.answer();
     call.on("stream", stream => {
       video.srcObject = stream;
       video.play().catch(() => {});
@@ -84,151 +88,106 @@ function startPeer() {
 }
 startPeer();
 
-// ---------- 2. Load the hand model ----------
+// ---------- 2. Load the object model ----------
 (async () => {
   const fileset = await FilesetResolver.forVisionTasks(BASE + "/wasm");
-  const make = delegate => HandLandmarker.createFromOptions(fileset, {
-    baseOptions: { modelAssetPath: HAND_MODEL, delegate }, runningMode: "VIDEO", numHands: 2,
-    minHandDetectionConfidence: CONFIG.handConfidence,
-    minHandPresenceConfidence: CONFIG.handConfidence,
-    minTrackingConfidence: CONFIG.handConfidence
+  const make = delegate => ObjectDetector.createFromOptions(fileset, {
+    baseOptions: { modelAssetPath: OBJ_MODEL, delegate }, runningMode: "VIDEO",
+    scoreThreshold: CONFIG.score, maxResults: CONFIG.maxResults
   });
-  try { handModel = await make("GPU"); } catch { handModel = await make("CPU"); }
-  msg("Hand model ready.");
+  try { detector = await make("GPU"); } catch { detector = await make("CPU"); }
+  msg("Object model ready.");
 })().catch(e => { console.error(e); msg("Model error: " + e.message); });
 
-// ---------- Smoothing: One Euro filter (steady when still, quick when moving) ----------
-class OneEuro {
-  constructor(minCutoff, beta) { this.minCutoff = minCutoff; this.beta = beta; this.dCutoff = 4; }
-  static alpha(cutoff, dt) { const tau = 1 / (2 * Math.PI * cutoff); return 1 / (1 + tau / dt); }
-  filter(x, tMs) {
-    if (this.x === undefined) { this.x = x; this.dx = 0; this.t = tMs; return x; }
-    const dt = Math.max((tMs - this.t) / 1000, 1e-3);
-    this.dx += OneEuro.alpha(this.dCutoff, dt) * ((x - this.x) / dt - this.dx);
-    const cutoff = this.minCutoff + this.beta * Math.abs(this.dx);
-    this.x += OneEuro.alpha(cutoff, dt) * (x - this.x);
-    this.t = tMs;
-    return this.x;
-  }
+// ---------- Helpers ----------
+function colorFor(name) {                                     // the same category always gets the same color
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return CONFIG.palette[h % CONFIG.palette.length];
 }
-const newTrack = () => ({
-  fx: Array.from({ length: 21 }, () => new OneEuro(CONFIG.smoothMinCutoff, CONFIG.smoothBeta)),
-  fy: Array.from({ length: 21 }, () => new OneEuro(CONFIG.smoothMinCutoff, CONFIG.smoothBeta)),
-  hist: [], stable: "other", lastSeen: 0,
-  dot: { x: 0, y: 0, visible: false, until: 0 }
-});
+function textColorOn(hex) {                                   // dark text on light colors, white on dark ones
+  const n = parseInt(hex.slice(1), 16), r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+  return (0.299 * r + 0.587 * g + 0.114 * b) > 140 ? "#000" : "#fff";
+}
+function iou(a, b) {
+  const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+  if (w <= 0 || h <= 0) return 0;
+  const inter = w * h;
+  return inter / (a.w * a.h + b.w * b.h - inter);
+}
 
-// ---------- 3. Main loop (runs on the computer) ----------
+// ---------- Tracking: match new detections to existing boxes so they glide instead of jitter ----------
+function updateTracks(dets) {
+  const used = new Set();
+  for (const t of tracks) {
+    let best = -1, bestIou = CONFIG.matchIou;
+    dets.forEach((d, i) => {
+      if (used.has(i) || d.name !== t.name) return;
+      const o = iou(t, d);
+      if (o > bestIou) { bestIou = o; best = i; }
+    });
+    if (best >= 0) {
+      const d = dets[best], k = CONFIG.smoothing;
+      used.add(best);
+      t.x += (d.x - t.x) * k; t.y += (d.y - t.y) * k;
+      t.w += (d.w - t.w) * k; t.h += (d.h - t.h) * k;
+      t.score = d.score; t.hits++; t.missed = 0;
+    } else t.missed++;
+  }
+  dets.forEach((d, i) => {
+    if (!used.has(i)) tracks.push({ id: nextId++, ...d, hits: 1, missed: 0, color: colorFor(d.name) });
+  });
+  tracks = tracks.filter(t => t.missed <= CONFIG.keepFrames);
+}
+
+// ---------- 3. Main loop ----------
 requestAnimationFrame(function loop() {
   requestAnimationFrame(loop);
-  if (!handModel || video.readyState < 2 || !video.videoWidth) return;
+  if (!detector || video.readyState < 2 || !video.videoWidth) return;
   if (video.currentTime === lastVideoTime) return;            // no new frame from the phone yet
   lastVideoTime = video.currentTime;
 
   if (view.width !== video.videoWidth || view.height !== video.videoHeight) {
     view.width = video.videoWidth; view.height = video.videoHeight;
   }
-  const now = performance.now();
   vctx.drawImage(video, 0, 0, view.width, view.height);
 
-  // Hands: smoothed screen points for drawing/aiming, 3D points for the gesture decision
-  // Track on the canvas (the upright picture you actually see), not the raw video: a phone held upright
-  // sends sideways frames plus a "rotate me" flag, which the canvas applies but the raw video does not.
-  const hr = handModel.detectForVideo(view, now);
-  const handed = hr.handedness || hr.handednesses || [];
-  const seen = new Set();
-  const hands = hr.landmarks.map((lm, i) => {
-    let key = handed[i]?.[0]?.categoryName || "hand";
-    if (seen.has(key)) key += i;                              // two hands with the same label: keep them apart
-    seen.add(key);
-    const tr = (tracks[key] = tracks[key] || newTrack());
-    tr.lastSeen = now;
-    const raw = lm.map(p => ({ x: p.x * view.width, y: p.y * view.height }));          // exactly where the model sees the hand
-    const pts = raw.map((p, j) => ({ x: tr.fx[j].filter(p.x, now), y: tr.fy[j].filter(p.y, now) }));   // smoothed, for aiming only
-    const gesture = debounce(tr, rawGesture(hr.worldLandmarks[i]));
-    return { raw, pts, gesture, tr };
-  });
-  for (const k in tracks) if (!seen.has(k) && now - tracks[k].lastSeen > 500) delete tracks[k];   // forget lost hands
+  // Detect on the canvas (the upright picture you actually see)
+  const res = detector.detectForVideo(view, performance.now());
+  const minArea = CONFIG.minAreaFrac * view.width * view.height;
+  const dets = res.detections
+    .map(d => ({ x: d.boundingBox.originX, y: d.boundingBox.originY, w: d.boundingBox.width, h: d.boundingBox.height,
+                 name: d.categories[0].categoryName, score: d.categories[0].score }))
+    .filter(d => d.w * d.h >= minArea)
+    .filter(d => !CONFIG.ignore.includes(d.name))
+    .filter(d => !CONFIG.only.length || CONFIG.only.includes(d.name));
+  updateTracks(dets);
 
-  // Red dot: sits on the line from the index knuckle through the fingertip
-  for (const h of hands) {
-    const dot = h.tr.dot;
-    if (h.gesture === "point") {
-      const base = h.pts[5], tip = h.pts[8];
-      const len = dist(base, tip) || 1;
-      const d = CONFIG.dotDistance * view.width;
-      const tx = Math.min(Math.max(tip.x + (tip.x - base.x) / len * d, 0), view.width);
-      const ty = Math.min(Math.max(tip.y + (tip.y - base.y) / len * d, 0), view.height);
-      if (!dot.visible) { dot.x = tx; dot.y = ty; } else { dot.x += (tx - dot.x) * 0.4; dot.y += (ty - dot.y) * 0.4; }
-      dot.visible = true; dot.until = now + CONFIG.keepMs;
-    } else if (now > dot.until) dot.visible = false;
-  }
+  // Draw big boxes first so small ones stay visible on top
+  const s = view.width / 640;
+  const visible = tracks.filter(t => t.hits >= CONFIG.confirmFrames && t.missed <= 2).sort((a, b) => b.w * b.h - a.w * a.h);
+  vctx.lineJoin = "miter";
+  vctx.textBaseline = "middle";
+  for (const t of visible) {
+    vctx.lineWidth = CONFIG.lineWidth * s;
+    vctx.strokeStyle = t.color;
+    vctx.strokeRect(t.x, t.y, t.w, t.h);
 
-  // Draw the hands, then the red dots on top
-  const s = view.width / 400;
-  for (const h of hands) drawHand(h.raw, h.gesture);
-  for (const h of hands) {
-    const dot = h.tr.dot;
-    if (!dot.visible) continue;
-    vctx.beginPath(); vctx.arc(dot.x, dot.y, 4.5 * s, 0, 7);
-    vctx.fillStyle = CONFIG.dotColor; vctx.fill();
-    vctx.lineWidth = 1.5 * s; vctx.strokeStyle = "#fff"; vctx.stroke();
+    const fs = Math.max(11, 17 * s);
+    vctx.font = `${fs}px ui-monospace, Menlo, Consolas, monospace`;
+    const text = CONFIG.showScore ? `${t.name} ${Math.round(t.score * 100)}%` : t.name;
+    const padX = fs * 0.55, lh = fs * 1.5, tw = vctx.measureText(text).width + padX * 2;
+    let lx = Math.min(Math.max(t.x - CONFIG.lineWidth * s / 2, 0), view.width - tw);
+    let ly = t.y - lh + CONFIG.lineWidth * s / 2;             // tag sits on top of the box
+    if (ly < 0) ly = t.y + CONFIG.lineWidth * s / 2;          // no room above: put it inside
+    vctx.fillStyle = t.color;
+    vctx.fillRect(lx, ly, tw, lh);
+    vctx.fillStyle = textColorOn(t.color);
+    vctx.fillText(text, lx + padX, ly + lh / 2 + 1);
   }
   present();
 });
-
-// ---------- Gesture detection (3D, so it works at any hand angle) ----------
-const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
-const sub3 = (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z });
-const len3 = v => Math.hypot(v.x, v.y, v.z);
-const dist3 = (a, b) => len3(sub3(a, b));
-function angleAt(a, b, c) {                                   // angle in degrees at point b
-  const u = sub3(a, b), v = sub3(c, b);
-  const cos = (u.x * v.x + u.y * v.y + u.z * v.z) / ((len3(u) * len3(v)) || 1);
-  return Math.acos(Math.max(-1, Math.min(1, cos))) * 180 / Math.PI;
-}
-
-function rawGesture(w) {                                      // w = 21 hand points in metres (real 3D)
-  if (!w) return "other";
-  const palm = dist3(w[0], w[9]) || 0.09;                     // wrist -> middle knuckle: size reference
-  if (dist3(w[4], w[8]) < CONFIG.pinchRatio * palm) return "pinch";
-
-  // A finger is extended if it's straight at its middle knuckle AND its tip is farther from the wrist than that knuckle
-  const [i, m, r, p] = [[5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20]].map(([mcp, pip, dip, tip]) =>
-    angleAt(w[mcp], w[pip], w[dip]) > CONFIG.fingerBendDeg && dist3(w[tip], w[0]) > dist3(w[pip], w[0]));
-  const n = [i, m, r, p].filter(Boolean).length;
-  if (n === 0) return "fist";
-  if (n === 4) return "open palm";
-  if (i && !m && !r && !p) return "point";
-  if (i && m && !r && !p) return "peace";
-  return "other";
-}
-
-// Only change the shown gesture when at least 3 of the last 5 frames agree (stops flicker)
-function debounce(tr, raw) {
-  tr.hist.push(raw);
-  if (tr.hist.length > 5) tr.hist.shift();
-  const counts = {};
-  for (const g of tr.hist) counts[g] = (counts[g] || 0) + 1;
-  const [g, c] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
-  if (c >= 3) tr.stable = g;
-  return tr.stable;
-}
-
-// ---------- Drawing ----------
-function drawHand(pts, gesture) {
-  const s = view.width / 400;
-  vctx.lineWidth = 2 * s; vctx.strokeStyle = "#39f"; vctx.fillStyle = "#fff";
-  for (const c of HandLandmarker.HAND_CONNECTIONS) {
-    const a = pts[c.start], b = pts[c.end];
-    vctx.beginPath(); vctx.moveTo(a.x, a.y); vctx.lineTo(b.x, b.y); vctx.stroke();
-  }
-  for (const q of pts) { vctx.beginPath(); vctx.arc(q.x, q.y, 3 * s, 0, 7); vctx.fill(); }
-  const w = pts[0];
-  vctx.font = `bold ${14 * s}px sans-serif`; vctx.textAlign = "center";
-  vctx.fillStyle = "rgba(0,0,0,.6)"; vctx.fillRect(w.x - 50 * s, w.y + 12 * s, 100 * s, 22 * s);
-  vctx.fillStyle = "#fff"; vctx.fillText(gesture, w.x, w.y + 28 * s);
-}
 
 function present() {                                          // fit the composed frame into the window
   const W = out.width, H = out.height;
