@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phone camera sender</title>
+<style>
+  body{margin:0;padding:16px;font-family:system-ui,sans-serif;background:#111;color:#fff}
+  input,button{font-size:18px;padding:12px;border-radius:10px;border:0}
+  input{width:7em;text-transform:uppercase;letter-spacing:.2em;text-align:center}
+  button{background:#fff;color:#000;margin-left:8px}
+  video{width:100%;max-height:60vh;margin-top:16px;border-radius:12px;background:#000}
+  #msg{margin-top:12px;color:#9cf}
+</style>
+</head>
+<body>
+<h2>Phone camera sender</h2>
+<p>Enter the code shown on the computer, then press start. This page only films and sends; all the tracking happens on the computer.</p>
+<input id="code" maxlength="4" placeholder="CODE" autocomplete="off">
+<button id="go">Start sending</button>
+<video id="preview" playsinline muted autoplay></video>
+<div id="msg"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const PREFIX = "handpoint-";                       // must match the viewer page
+const $ = id => document.getElementById(id);
+const msg = t => { $("msg").textContent = t; };
+
+// The viewer shows a link like phone-sender.html?code=ABCD, so the code can be pre-filled
+const urlCode = new URLSearchParams(location.search).get("code");
+if (urlCode) $("code").value = urlCode;
+
+$("go").onclick = async () => {
+  const code = $("code").value.trim().toUpperCase();
+  if (!code) return msg("Enter the code from the computer first.");
+  $("go").disabled = true;
+
+  try {
+    // 1. Open the rear camera
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+      audio: false
+    });
+    stream.getVideoTracks()[0].contentHint = "motion";   // prefer smooth motion over sharpness
+    $("preview").srcObject = stream;
+    try { await navigator.wakeLock.request("screen"); } catch {}   // keep the screen on while filming
+
+    // 2. Call the viewer and send the video
+    const peer = new Peer();
+    peer.on("open", () => {
+      msg("Connecting...");
+      const call = peer.call(PREFIX + code, stream);
+      const pc = call.peerConnection;
+      if (pc) pc.addEventListener("iceconnectionstatechange", () => {
+        if (["connected", "completed"].includes(pc.iceConnectionState)) msg("Sending video to the computer.");
+        else if (["failed", "disconnected"].includes(pc.iceConnectionState)) msg("Connection lost (" + pc.iceConnectionState + ").");
+      });
+      call.on("close", () => msg("Viewer closed the connection."));
+    });
+    peer.on("error", e => {
+      $("go").disabled = false;
+      msg(e.type === "peer-unavailable"
+        ? "No viewer found for that code. Is the computer page open, and is the code correct?"
+        : "Connection error: " + e.type);
+    });
+  } catch (e) {
+    $("go").disabled = false;
+    msg("Could not start the camera: " + e.message);
+  }
+};
+</script>
+</body>
+</html>
