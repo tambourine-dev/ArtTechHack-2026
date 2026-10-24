@@ -74,21 +74,33 @@ function updateGaze(frame) {
 
 // --- Object recognition -----------------------------------------------------
 
-// Small panel at the lower right of the view: the camera image with the detections.
+// Transparent overlay in front of the eyes that covers the camera's field of view, so the
+// detection boxes sit roughly on top of the real objects in passthrough. Alignment is
+// approximate: the camera is offset from the eyes, and its FOV is an estimate to tune.
+const CAMERA_HFOV = THREE.MathUtils.degToRad(70);
+const OVERLAY_DISTANCE = 1;
+
 const hudCanvas = document.createElement('canvas');
-hudCanvas.width = 640;
-hudCanvas.height = 480;
+hudCanvas.width = 1280;
+hudCanvas.height = 960;
 const hudCtx = hudCanvas.getContext('2d');
 const hudTexture = new THREE.CanvasTexture(hudCanvas);
 hudTexture.colorSpace = THREE.SRGBColorSpace;
 const hud = new THREE.Mesh(
-  new THREE.PlaneGeometry(0.24, 0.18),
-  new THREE.MeshBasicMaterial({ map: hudTexture, transparent: true, opacity: 0.9, depthTest: false }),
+  new THREE.PlaneGeometry(1, 1),
+  new THREE.MeshBasicMaterial({ map: hudTexture, transparent: true, depthTest: false }),
 );
-hud.position.set(0.22, -0.18, -0.6);
+hud.position.set(0, 0, -OVERLAY_DISTANCE);
 hud.renderOrder = 9;
 hud.visible = false;
 camera.add(hud);
+
+// Sizes the overlay to the camera's FOV and the video's aspect ratio.
+function fitHud(video) {
+  const width = 2 * OVERLAY_DISTANCE * Math.tan(CAMERA_HFOV / 2);
+  hud.scale.set(width, (width * video.videoHeight) / video.videoWidth, 1);
+  hudCanvas.height = Math.round((hudCanvas.width * video.videoHeight) / video.videoWidth);
+}
 
 // The detector runs on the camera image, but the gaze ray points through the centre of
 // the view. The passthrough camera roughly faces the same way, so the object whose box
@@ -107,20 +119,25 @@ function drawHud(video, detections, target) {
   const { width, height } = hudCanvas;
   const sx = width / video.videoWidth;
   const sy = height / video.videoHeight;
-  hudCtx.drawImage(video, 0, 0, width, height);
-  hudCtx.lineWidth = 4;
-  hudCtx.font = 'bold 26px system-ui, sans-serif';
+  hudCtx.clearRect(0, 0, width, height);
+  // In AR the real world shows through; the flat view has no passthrough, so show the camera.
+  if (!renderer.xr.isPresenting) hudCtx.drawImage(video, 0, 0, width, height);
+  hudCtx.lineWidth = 6;
+  hudCtx.font = 'bold 36px system-ui, sans-serif';
   for (const d of detections) {
     const { originX, originY, width: w, height: h } = d.box;
-    hudCtx.strokeStyle = hudCtx.fillStyle = d === target ? '#ff2020' : '#22ff66';
-    hudCtx.strokeRect(originX * sx, originY * sy, w * sx, h * sy);
-    hudCtx.fillText(`${d.label} ${Math.round(d.score * 100)}%`, originX * sx + 6, originY * sy + 28);
+    const x = originX * sx;
+    const y = originY * sy;
+    const label = `${d.label} ${Math.round(d.score * 100)}%`;
+    const color = d === target ? '#ff2020' : '#22ff66';
+    hudCtx.strokeStyle = color;
+    hudCtx.strokeRect(x, y, w * sx, h * sy);
+    // Dark backing so the label stays readable on bright surroundings.
+    hudCtx.fillStyle = 'rgba(0,0,0,.6)';
+    hudCtx.fillRect(x, y, hudCtx.measureText(label).width + 16, 48);
+    hudCtx.fillStyle = color;
+    hudCtx.fillText(label, x + 8, y + 38);
   }
-  // Crosshair for the image centre, i.e. roughly where the gaze dot points.
-  hudCtx.strokeStyle = '#ff2020';
-  hudCtx.beginPath();
-  hudCtx.arc(width / 2, height / 2, 8, 0, Math.PI * 2);
-  hudCtx.stroke();
   hudTexture.needsUpdate = true;
 }
 
@@ -138,6 +155,7 @@ status.addEventListener('click', async () => {
     const video = await startCamera();
     status.textContent = 'Loading object model…';
     const detector = await createDetector();
+    fitHud(video);
     hud.visible = true;
     runDetection(detector, video, (detections) => {
       const target = lookedAt(detections, video.videoWidth, video.videoHeight);
