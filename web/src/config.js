@@ -23,4 +23,7 @@ export const CONFIG = {
   cameraHFov: 72,        // horizontal field of view the picture covers, in degrees
   cameraYaw: 0,          // degrees the picture is shifted right (+) or left (-)
   cameraPitch: 0,        // degrees the picture is shifted up (+) or down (-)
+  // How old a camera frame is when it arrives. The boxes are turned by how far your head
+  // has moved since the frame was taken, so they stay on things while you look around.
+  cameraLatencyMs: 80,
 };

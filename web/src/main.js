@@ -6,7 +6,7 @@ import { drawTracks } from './draw.js';
 import { startCamera } from './camera.js';
 
 const CALIBRATION_KEY = 'overlayCalibration';
-const CALIBRATION_FIELDS = ['cameraHFov', 'cameraYaw', 'cameraPitch'];
+const CALIBRATION_FIELDS = ['cameraHFov', 'cameraYaw', 'cameraPitch', 'cameraLatencyMs'];
 
 try {
   Object.assign(CONFIG, JSON.parse(localStorage.getItem(CALIBRATION_KEY)));
@@ -119,6 +119,10 @@ function present() {
 // CONFIG.arShowCamera). Both eyes get the identical image (the vertex shader skips the
 // per-eye view matrix), so it's never placed at a depth in the 3D scene; it covers the part
 // of your view the camera sees. CONFIG.cameraHFov/Yaw/Pitch line it up with the room.
+//
+// The boxes come from a camera frame that is already old (camera delay plus detection
+// time), so the image is turned by how far the head has rotated since that frame was
+// taken. It stays a flat 2D image; it just shifts the way the world did.
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
 
@@ -167,12 +171,66 @@ arView.frustumCulled = false;
 arView.visible = false;
 scene.add(arView);
 
+// Ring at the centre of your view, in the color of the box you're looking at. Head-locked
+// with the same projection-only shader, so it's flat too.
+const ring = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.03, 0.03).translate(0, 0, -1),
+  new THREE.ShaderMaterial({
+    uniforms: { color: { value: new THREE.Color() } },
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform vec3 color;
+      varying vec2 vUv;
+      void main() {
+        float d = length(vUv - 0.5) * 2.0;
+        gl_FragColor = vec4(color, smoothstep(0.62, 0.7, d) * (1.0 - smoothstep(0.92, 1.0, d)));
+      }`,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+  }),
+);
+ring.frustumCulled = false;
+ring.renderOrder = 1;
+scene.add(ring);
+
+// Recent head orientations, to look up where the head pointed when a frame was taken.
+const headHistory = [];
+const headNow = new THREE.Quaternion();
+const headAtCapture = new THREE.Quaternion();
+const headDelta = new THREE.Quaternion(); // capture view → current view
+let hasCapture = false;
+
+function recordHead(xrFrame) {
+  const pose = xrFrame?.getViewerPose(renderer.xr.getReferenceSpace());
+  if (!pose) return;
+  const { x, y, z, w } = pose.transform.orientation;
+  headNow.set(x, y, z, w);
+  const now = performance.now();
+  headHistory.push({ t: now, q: headNow.clone() });
+  while (headHistory.length && headHistory[0].t < now - 1000) headHistory.shift();
+}
+
+function headAt(t) {
+  let best = headHistory[headHistory.length - 1];
+  for (const entry of headHistory) if (Math.abs(entry.t - t) < Math.abs(best.t - t)) best = entry;
+  return best.q;
+}
+
 const cameraRotation = new THREE.Quaternion();
 const euler = new THREE.Euler();
 const corner = new THREE.Vector3();
 
-// Places the picture's corners 1 m in front of the eyes, covering the camera's FOV.
+// Places the picture's corners 1 m in front of the eyes, covering the camera's FOV, turned
+// by the head rotation since the frame was taken.
 function layoutARView() {
+  if (!hasCapture) headAtCapture.copy(headNow);
+  headDelta.copy(headNow).invert().multiply(headAtCapture);
   euler.set(THREE.MathUtils.degToRad(CONFIG.cameraPitch), THREE.MathUtils.degToRad(-CONFIG.cameraYaw), 0, 'YXZ');
   cameraRotation.setFromEuler(euler);
   const tx = Math.tan(THREE.MathUtils.degToRad(CONFIG.cameraHFov) / 2);
@@ -180,7 +238,7 @@ function layoutARView() {
   const position = arView.geometry.attributes.position;
   // PlaneGeometry's vertex order: top-left, top-right, bottom-left, bottom-right.
   [[-tx, ty], [tx, ty], [-tx, -ty], [tx, -ty]].forEach(([x, y], i) => {
-    corner.set(x, y, -1).applyQuaternion(cameraRotation);
+    corner.set(x, y, -1).applyQuaternion(cameraRotation).applyQuaternion(headDelta);
     position.setXYZ(i, corner.x, corner.y, corner.z);
   });
   position.needsUpdate = true;
@@ -189,7 +247,7 @@ function layoutARView() {
 // The centre of your view in camera-picture coordinates (0..1).
 const forward = new THREE.Vector3();
 function viewCentre() {
-  forward.set(0, 0, -1).applyQuaternion(cameraRotation.clone().invert());
+  forward.set(0, 0, -1).applyQuaternion(headDelta.clone().invert()).applyQuaternion(cameraRotation.clone().invert());
   const tx = Math.tan(THREE.MathUtils.degToRad(CONFIG.cameraHFov) / 2);
   const ty = (tx * video.videoHeight) / video.videoWidth;
   return { u: 0.5 + forward.x / -forward.z / (2 * tx), v: 0.5 - forward.y / -forward.z / (2 * ty) };
@@ -215,18 +273,11 @@ function drawBoxes() {
   boxCtx.clearRect(0, 0, W, H);
   drawTracks(boxCtx, tracks, W, H);
 
-  // Ring at the centre of your view, in the color of the box you're looking at.
-  const centre = viewCentre();
-  boxCtx.lineWidth = 5;
-  boxCtx.strokeStyle = lookedAt(centre)?.color ?? '#ff2020';
-  boxCtx.beginPath();
-  boxCtx.arc(centre.u * W, centre.v * H, 14, 0, Math.PI * 2);
-  boxCtx.stroke();
-
   if (calibrating) {
     const text =
       `FOV ${CONFIG.cameraHFov.toFixed(1)}°  x ${CONFIG.cameraYaw.toFixed(1)}°  ` +
-      `y ${CONFIG.cameraPitch.toFixed(1)}°  detect ${Math.round(detectMs)} ms`;
+      `y ${CONFIG.cameraPitch.toFixed(1)}°  lag ${Math.round(CONFIG.cameraLatencyMs)} ms  ` +
+      `detect ${Math.round(detectMs)} ms`;
     boxCtx.font = 'bold 36px system-ui, sans-serif';
     const w = boxCtx.measureText(text).width + 40;
     boxCtx.fillStyle = 'rgba(0,0,0,.7)';
@@ -260,6 +311,8 @@ function uploadVideoFrame() {
 // exposed, so the boxes are lined up with the room by eye. A (right controller) toggles
 // setup mode: the camera picture shows half-transparent over the passthrough, the right
 // thumbstick moves it (and the boxes), and the left thumbstick up/down scales it.
+// Left thumbstick left/right sets the camera lag: shake your head and tune it until the
+// picture stays put on the room instead of swinging after it.
 let calibrating = false;
 let aWasPressed = false;
 
@@ -279,9 +332,10 @@ function updateCalibration(frame, dt) {
       if (calibrating && Math.abs(ax) > 0.2) CONFIG.cameraYaw += ax * dt * 6;
       if (calibrating && Math.abs(ay) > 0.2) CONFIG.cameraPitch -= ay * dt * 6;
       changed ||= calibrating && (Math.abs(ax) > 0.2 || Math.abs(ay) > 0.2);
-    } else if (input.handedness === 'left' && calibrating && Math.abs(ay) > 0.2) {
-      CONFIG.cameraHFov = THREE.MathUtils.clamp(CONFIG.cameraHFov - ay * dt * 10, 30, 130);
-      changed = true;
+    } else if (input.handedness === 'left' && calibrating) {
+      if (Math.abs(ay) > 0.2) CONFIG.cameraHFov = THREE.MathUtils.clamp(CONFIG.cameraHFov - ay * dt * 10, 30, 130);
+      if (Math.abs(ax) > 0.2) CONFIG.cameraLatencyMs = THREE.MathUtils.clamp(CONFIG.cameraLatencyMs + ax * dt * 60, 0, 400);
+      changed ||= Math.abs(ax) > 0.2 || Math.abs(ay) > 0.2;
     }
   }
   arView.material.uniforms.opacity.value = calibrating ? 0.5 : CONFIG.arShowCamera ? 1 : 0;
@@ -320,6 +374,8 @@ arButton.addEventListener('click', async () => {
 renderer.xr.addEventListener('sessionstart', () => ($('panel').hidden = true));
 renderer.xr.addEventListener('sessionend', () => {
   arView.visible = false;
+  hasCapture = false;
+  headHistory.length = 0;
   if (calibrating) toggleCalibration();
   $('panel').hidden = false;
 });
@@ -351,10 +407,17 @@ renderer.setAnimationLoop((time, xrFrame) => {
     return;
   }
 
-  arView.visible = video?.videoWidth > 0;
+  recordHead(xrFrame);
+  arView.visible = ring.visible = video?.videoWidth > 0 && headHistory.length > 0;
   if (arView.visible) {
+    // The detection that just ran used a frame taken about cameraLatencyMs before it started.
+    if (detected) {
+      headAtCapture.copy(headAt(lastDetect - CONFIG.cameraLatencyMs));
+      hasCapture = true;
+    }
     const changed = updateCalibration(xrFrame, dt);
     layoutARView();
+    ring.material.uniforms.color.value.setStyle(lookedAt(viewCentre())?.color ?? '#ff2020', THREE.LinearSRGBColorSpace);
     if (arView.material.uniforms.opacity.value > 0) uploadVideoFrame();
     if (detected || changed || calibrating) drawBoxes();
   }
