@@ -114,11 +114,11 @@ function present() {
 
 // --- AR view ----------------------------------------------------------------
 
-// In AR you see the same thing as in the browser: the camera picture with the boxes drawn
-// on, as one flat 2D image. Both eyes get the identical image (the vertex shader skips the
-// per-eye view matrix), so it's never placed at a depth in the 3D scene; it just covers
-// the part of your view the camera sees. CONFIG.cameraHFov/Yaw/Pitch line its edges up
-// with the passthrough around it.
+// In AR the boxes are shown over the passthrough as one flat 2D image, the same layout as
+// the browser view but without the camera picture (unless in setup mode or
+// CONFIG.arShowCamera). Both eyes get the identical image (the vertex shader skips the
+// per-eye view matrix), so it's never placed at a depth in the 3D scene; it covers the part
+// of your view the camera sees. CONFIG.cameraHFov/Yaw/Pitch line it up with the room.
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
 
@@ -257,9 +257,9 @@ function uploadVideoFrame() {
 // --- Calibration ------------------------------------------------------------
 
 // The headset camera sits a little off from your eyes and its exact field of view isn't
-// exposed, so the picture's edges are lined up with the passthrough by eye. A (right
-// controller) toggles calibration: the picture turns half-transparent, the right thumbstick
-// moves it, and the left thumbstick up/down makes it bigger or smaller.
+// exposed, so the boxes are lined up with the room by eye. A (right controller) toggles
+// setup mode: the camera picture shows half-transparent over the passthrough, the right
+// thumbstick moves it (and the boxes), and the left thumbstick up/down scales it.
 let calibrating = false;
 let aWasPressed = false;
 
@@ -355,7 +355,7 @@ renderer.setAnimationLoop((time, xrFrame) => {
   if (arView.visible) {
     const changed = updateCalibration(xrFrame, dt);
     layoutARView();
-    uploadVideoFrame();
+    if (arView.material.uniforms.opacity.value > 0) uploadVideoFrame();
     if (detected || changed || calibrating) drawBoxes();
   }
   renderer.render(scene, camera);

@@ -16,9 +16,10 @@ export const CONFIG = {
   palette: ['#66ff44', '#ff33ff', '#2b2bff', '#ffee33', '#33aaff', '#ff9933', '#33ffcc', '#ff4466', '#aa66ff', '#ccff33'],
   detectEveryMs: 0,      // minimum time between detections; 0 = every new camera frame
 
-  // AR: the camera picture with the boxes is shown as a flat image over the passthrough.
-  arShowCamera: true,    // false = only the boxes over the passthrough (they won't line up exactly)
-  // Where the picture sits in your view. Tuned live in calibration (A button), remembered.
+  // AR: only the boxes are shown over the passthrough. In setup mode (A button) the camera
+  // picture appears half-transparent, to line the boxes up with the room.
+  arShowCamera: false,   // true = also show the camera picture outside setup mode
+  // Where the boxes sit in your view. Tuned live in setup mode, remembered on the headset.
   cameraHFov: 72,        // horizontal field of view the picture covers, in degrees
   cameraYaw: 0,          // degrees the picture is shifted right (+) or left (-)
   cameraPitch: 0,        // degrees the picture is shifted up (+) or down (-)
