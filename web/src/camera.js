@@ -11,5 +11,8 @@ export async function startCamera() {
   video.playsInline = true;
   video.srcObject = stream;
   await video.play();
+  // three.js sizes video textures from width/height, which are 0 unless set.
+  video.width = video.videoWidth;
+  video.height = video.videoHeight;
   return video;
 }

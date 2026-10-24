@@ -5,11 +5,6 @@ import { Tracker } from './tracker.js';
 import { drawTracks } from './draw.js';
 import { startCamera } from './camera.js';
 
-// Quest 3 has no eye-tracking cameras, and the Quest browser doesn't expose eye gaze to
-// WebXR on any headset. The gaze dot therefore follows the head: it sits where the centre
-// of your view meets a real surface (WebXR hit-test), or CONFIG.overlayDistance ahead.
-const DOT_SIZE = 0.012; // relative to distance, so the dot keeps the same size on screen
-const DOT_COLOR = 0xff2020;
 const CALIBRATION_KEY = 'overlayCalibration';
 const CALIBRATION_FIELDS = ['cameraHFov', 'cameraYaw', 'cameraPitch'];
 
@@ -117,167 +112,180 @@ function present() {
   octx.drawImage(view, (W - dw) / 2, (H - dh) / 2, dw, dh);
 }
 
-// --- Scene ------------------------------------------------------------------
+// --- AR view ----------------------------------------------------------------
 
+// In AR you see the same thing as in the browser: the camera picture with the boxes drawn
+// on, as one flat 2D image. Both eyes get the identical image (the vertex shader skips the
+// per-eye view matrix), so it's never placed at a depth in the 3D scene; it just covers
+// the part of your view the camera sees. CONFIG.cameraHFov/Yaw/Pitch line its edges up
+// with the passthrough around it.
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
-scene.add(camera); // the overlay is a child of the camera, so it follows the head
 
-// Transparent clear so the passthrough shows through in immersive-ar. The canvas itself
-// is never shown: outside AR the 2D view is, and in AR the headset composites the frames.
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
 renderer.setClearColor(0x000000, 0);
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.xr.enabled = true;
-renderer.xr.setReferenceSpaceType('local-floor');
-renderer.domElement.hidden = true;
+renderer.xr.setReferenceSpaceType('local');
+renderer.domElement.hidden = true; // outside AR the 2D canvas is shown instead
 document.body.appendChild(renderer.domElement);
 
-// --- 2D overlay -------------------------------------------------------------
+// The boxes are drawn on their own transparent canvas, only when they change; the camera
+// picture is uploaded straight from the video element.
+const boxCanvas = document.createElement('canvas');
+const boxCtx = boxCanvas.getContext('2d');
+const boxTexture = new THREE.CanvasTexture(boxCanvas);
+let videoTexture = null;
+let lastUploadTime = -1;
 
-// What you see in AR is treated as a flat picture: the boxes are drawn in camera-picture
-// coordinates on a canvas, and that canvas is shown head-locked in front of you, sized and
-// shifted so the camera picture covers the same part of your view as the real world.
-// The pivot turns by the calibrated yaw/pitch; the plane sits at the gaze distance so its
-// stereo depth roughly matches what you're looking at.
-const overlayCanvas = document.createElement('canvas');
-overlayCanvas.width = 1280;
-overlayCanvas.height = 960;
-const overlayCtx = overlayCanvas.getContext('2d');
-const overlayTexture = new THREE.CanvasTexture(overlayCanvas);
-overlayTexture.colorSpace = THREE.SRGBColorSpace;
-const overlay = new THREE.Mesh(
+const arView = new THREE.Mesh(
   new THREE.PlaneGeometry(1, 1),
-  new THREE.MeshBasicMaterial({ map: overlayTexture, transparent: true, depthTest: false }),
+  new THREE.ShaderMaterial({
+    uniforms: { videoMap: { value: null }, boxMap: { value: boxTexture }, opacity: { value: 1 } },
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * vec4(position, 1.0); // head-locked, same in both eyes
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform sampler2D videoMap;
+      uniform sampler2D boxMap;
+      uniform float opacity;
+      varying vec2 vUv;
+      void main() {
+        vec4 v = texture2D(videoMap, vUv);
+        vec4 b = texture2D(boxMap, vUv);
+        gl_FragColor = vec4(mix(v.rgb, b.rgb, b.a), max(opacity, b.a));
+      }`,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+  }),
 );
-overlay.renderOrder = 5;
-const overlayPivot = new THREE.Group();
-overlayPivot.add(overlay);
-overlayPivot.visible = false;
-camera.add(overlayPivot);
+arView.frustumCulled = false;
+arView.visible = false;
+scene.add(arView);
 
-let calibrating = false;
+const cameraRotation = new THREE.Quaternion();
+const euler = new THREE.Euler();
+const corner = new THREE.Vector3();
 
-function drawOverlay() {
-  const W = overlayCanvas.width;
-  const H = Math.round((W * video.videoHeight) / video.videoWidth);
-  if (overlayCanvas.height !== H) {
-    overlayCanvas.height = H;
-    overlayTexture.dispose(); // reallocate at the new size on the next upload
-  }
-  overlayCtx.clearRect(0, 0, W, H);
-  // In calibration the camera picture shows half-transparent, to line it up with the room.
-  if (calibrating) {
-    overlayCtx.globalAlpha = 0.5;
-    overlayCtx.drawImage(video, 0, 0, W, H);
-    overlayCtx.globalAlpha = 1;
-  }
-  drawTracks(overlayCtx, tracks, W, H);
-  overlayTexture.needsUpdate = true;
+// Places the picture's corners 1 m in front of the eyes, covering the camera's FOV.
+function layoutARView() {
+  euler.set(THREE.MathUtils.degToRad(CONFIG.cameraPitch), THREE.MathUtils.degToRad(-CONFIG.cameraYaw), 0, 'YXZ');
+  cameraRotation.setFromEuler(euler);
+  const tx = Math.tan(THREE.MathUtils.degToRad(CONFIG.cameraHFov) / 2);
+  const ty = (tx * video.videoHeight) / video.videoWidth;
+  const position = arView.geometry.attributes.position;
+  // PlaneGeometry's vertex order: top-left, top-right, bottom-left, bottom-right.
+  [[-tx, ty], [tx, ty], [-tx, -ty], [tx, -ty]].forEach(([x, y], i) => {
+    corner.set(x, y, -1).applyQuaternion(cameraRotation);
+    position.setXYZ(i, corner.x, corner.y, corner.z);
+  });
+  position.needsUpdate = true;
 }
 
-const tx = () => Math.tan(THREE.MathUtils.degToRad(CONFIG.cameraHFov) / 2);
-
-function layoutOverlay() {
-  overlayPivot.rotation.set(
-    THREE.MathUtils.degToRad(CONFIG.cameraPitch),
-    THREE.MathUtils.degToRad(-CONFIG.cameraYaw),
-    0,
-    'YXZ',
-  );
-  const d = gazeDistance;
-  const width = 2 * d * tx();
-  overlay.position.set(0, 0, -d);
-  overlay.scale.set(width, (width * video.videoHeight) / video.videoWidth, 1);
-}
-
-// The centre of your view in camera-picture coordinates (0..1): where the head ray
-// crosses the overlay.
+// The centre of your view in camera-picture coordinates (0..1).
 const forward = new THREE.Vector3();
-const pivotInverse = new THREE.Quaternion();
 function viewCentre() {
-  pivotInverse.copy(overlayPivot.quaternion).invert();
-  forward.set(0, 0, -1).applyQuaternion(pivotInverse);
-  const ty = (tx() * video.videoHeight) / video.videoWidth;
-  return { u: 0.5 + forward.x / -forward.z / (2 * tx()), v: 0.5 - forward.y / -forward.z / (2 * ty) };
+  forward.set(0, 0, -1).applyQuaternion(cameraRotation.clone().invert());
+  const tx = Math.tan(THREE.MathUtils.degToRad(CONFIG.cameraHFov) / 2);
+  const ty = (tx * video.videoHeight) / video.videoWidth;
+  return { u: 0.5 + forward.x / -forward.z / (2 * tx), v: 0.5 - forward.y / -forward.z / (2 * ty) };
 }
 
-// The object you're looking at: the smallest box that contains the centre of your view.
-function lookedAt() {
-  const { u, v } = viewCentre();
+// Quest 3 has no eye tracking, and the Quest browser doesn't expose eye gaze to WebXR on
+// any headset, so "looking at" means the centre of your view (head gaze). The object you
+// look at is the smallest box containing it.
+function lookedAt({ u, v }) {
   return tracks
     .filter((t) => u >= t.x && u <= t.x + t.w && v >= t.y && v <= t.y + t.h)
     .sort((a, b) => a.w * a.h - b.w * b.h)[0];
 }
 
-// --- Gaze dot ---------------------------------------------------------------
-
-const dot = new THREE.Sprite(new THREE.SpriteMaterial({ map: circleTexture(), color: DOT_COLOR, depthTest: false }));
-dot.renderOrder = 10;
-scene.add(dot);
-
-let hitTestSource = null;
-let gazeDistance = CONFIG.overlayDistance;
-const head = renderer.xr.getCamera();
-const headPos = new THREE.Vector3();
-const headDir = new THREE.Vector3();
-const hitMatrix = new THREE.Matrix4();
-const hitPos = new THREE.Vector3();
-
-function updateGaze(frame) {
-  head.getWorldPosition(headPos);
-  head.getWorldDirection(headDir);
-
-  let target = CONFIG.overlayDistance;
-  if (frame && hitTestSource) {
-    const pose = frame.getHitTestResults(hitTestSource)[0]?.getPose(renderer.xr.getReferenceSpace());
-    if (pose) {
-      hitMatrix.fromArray(pose.transform.matrix);
-      target = THREE.MathUtils.clamp(hitPos.setFromMatrixPosition(hitMatrix).distanceTo(headPos), 0.3, 5);
-    }
+function drawBoxes() {
+  const W = 1280;
+  const H = Math.round((W * video.videoHeight) / video.videoWidth);
+  if (boxCanvas.width !== W || boxCanvas.height !== H) {
+    boxCanvas.width = W;
+    boxCanvas.height = H;
+    boxTexture.dispose(); // reallocate at the new size on the next upload
   }
-  // Eased, so the overlay's stereo depth doesn't jump between surfaces.
-  gazeDistance += (target - gazeDistance) * 0.1;
-  dot.position.copy(headPos).addScaledVector(headDir, gazeDistance);
-  dot.scale.setScalar(gazeDistance * DOT_SIZE);
+  boxCtx.clearRect(0, 0, W, H);
+  drawTracks(boxCtx, tracks, W, H);
+
+  // Ring at the centre of your view, in the color of the box you're looking at.
+  const centre = viewCentre();
+  boxCtx.lineWidth = 5;
+  boxCtx.strokeStyle = lookedAt(centre)?.color ?? '#ff2020';
+  boxCtx.beginPath();
+  boxCtx.arc(centre.u * W, centre.v * H, 14, 0, Math.PI * 2);
+  boxCtx.stroke();
+
+  if (calibrating) {
+    const text =
+      `FOV ${CONFIG.cameraHFov.toFixed(1)}°  x ${CONFIG.cameraYaw.toFixed(1)}°  ` +
+      `y ${CONFIG.cameraPitch.toFixed(1)}°  detect ${Math.round(detectMs)} ms`;
+    boxCtx.font = 'bold 36px system-ui, sans-serif';
+    const w = boxCtx.measureText(text).width + 40;
+    boxCtx.fillStyle = 'rgba(0,0,0,.7)';
+    boxCtx.fillRect((W - w) / 2, H - 120, w, 60);
+    boxCtx.fillStyle = '#fff';
+    boxCtx.textAlign = 'center';
+    boxCtx.textBaseline = 'middle';
+    boxCtx.fillText(text, W / 2, H - 90);
+    boxCtx.textAlign = 'start';
+  }
+  boxTexture.needsUpdate = true;
+}
+
+// Uploads a new camera frame to the GPU. Done by hand rather than with THREE.VideoTexture,
+// which relies on requestVideoFrameCallback and may not fire during an immersive session.
+function uploadVideoFrame() {
+  if (!videoTexture) {
+    videoTexture = new THREE.Texture(video);
+    videoTexture.minFilter = THREE.LinearFilter;
+    videoTexture.generateMipmaps = false;
+    arView.material.uniforms.videoMap.value = videoTexture;
+  }
+  if (video.currentTime === lastUploadTime) return;
+  lastUploadTime = video.currentTime;
+  videoTexture.needsUpdate = true;
 }
 
 // --- Calibration ------------------------------------------------------------
 
 // The headset camera sits a little off from your eyes and its exact field of view isn't
-// exposed, so the overlay is lined up by eye. A (right controller) toggles the calibration
-// view, which shows the camera picture half-transparent over the passthrough:
-// right thumbstick moves it, left thumbstick up/down makes it bigger or smaller.
-const readout = makeTextSprite();
-readout.sprite.position.set(0, -0.28, -1);
-readout.sprite.scale.set(0.5, 0.125, 1);
-camera.add(readout.sprite);
+// exposed, so the picture's edges are lined up with the passthrough by eye. A (right
+// controller) toggles calibration: the picture turns half-transparent, the right thumbstick
+// moves it, and the left thumbstick up/down makes it bigger or smaller.
+let calibrating = false;
 let aWasPressed = false;
 
 function updateCalibration(frame, dt) {
+  let changed = false;
   for (const input of frame?.session.inputSources ?? []) {
     const pad = input.gamepad;
     if (!pad) continue;
     const [, , ax = 0, ay = 0] = pad.axes;
     if (input.handedness === 'right') {
       const aPressed = pad.buttons[4]?.pressed ?? false;
-      if (aPressed && !aWasPressed) toggleCalibration();
-      aWasPressed = aPressed;
-      if (calibrating) {
-        if (Math.abs(ax) > 0.2) CONFIG.cameraYaw += ax * dt * 6;
-        if (Math.abs(ay) > 0.2) CONFIG.cameraPitch -= ay * dt * 6;
+      if (aPressed && !aWasPressed) {
+        toggleCalibration();
+        changed = true;
       }
+      aWasPressed = aPressed;
+      if (calibrating && Math.abs(ax) > 0.2) CONFIG.cameraYaw += ax * dt * 6;
+      if (calibrating && Math.abs(ay) > 0.2) CONFIG.cameraPitch -= ay * dt * 6;
+      changed ||= calibrating && (Math.abs(ax) > 0.2 || Math.abs(ay) > 0.2);
     } else if (input.handedness === 'left' && calibrating && Math.abs(ay) > 0.2) {
       CONFIG.cameraHFov = THREE.MathUtils.clamp(CONFIG.cameraHFov - ay * dt * 10, 30, 130);
+      changed = true;
     }
   }
-  readout.sprite.visible = calibrating;
-  if (calibrating) {
-    readout.set(
-      `FOV ${CONFIG.cameraHFov.toFixed(1)}°  x ${CONFIG.cameraYaw.toFixed(1)}°  y ${CONFIG.cameraPitch.toFixed(1)}°  ` +
-        `detect ${Math.round(detectMs)} ms`,
-    );
-  }
+  arView.material.uniforms.opacity.value = calibrating ? 0.5 : CONFIG.arShowCamera ? 1 : 0;
+  return changed;
 }
 
 function toggleCalibration() {
@@ -290,9 +298,8 @@ function toggleCalibration() {
 
 // --- AR session -------------------------------------------------------------
 
-// Quest 3 passthrough: an immersive-ar session with floor-level tracking. hit-test finds
-// the distance to what you're looking at (needs Space Setup on the headset). No
-// dom-overlay: Quest doesn't support it, so everything in AR is drawn by three.js.
+// Quest 3 passthrough: an immersive-ar session. No dom-overlay (Quest doesn't support it),
+// so everything in AR is drawn through three.js.
 const arButton = $('start-ar');
 if (!isPhone) {
   navigator.xr?.isSessionSupported('immersive-ar').then((ok) => {
@@ -303,28 +310,16 @@ if (!isPhone) {
 
 arButton.addEventListener('click', async () => {
   try {
-    const session = await navigator.xr.requestSession('immersive-ar', {
-      requiredFeatures: ['local-floor'],
-      optionalFeatures: ['hit-test'],
-    });
-    await renderer.xr.setSession(session);
+    await renderer.xr.setSession(await navigator.xr.requestSession('immersive-ar'));
   } catch (err) {
     console.error(err);
     msg(`Could not start AR: ${err.message}`);
   }
 });
 
-renderer.xr.addEventListener('sessionstart', async () => {
-  const session = renderer.xr.getSession();
-  $('panel').hidden = true;
-  if (!session.requestHitTestSource) return;
-  const viewer = await session.requestReferenceSpace('viewer');
-  hitTestSource = await session.requestHitTestSource({ space: viewer }).catch(() => null);
-});
-
+renderer.xr.addEventListener('sessionstart', () => ($('panel').hidden = true));
 renderer.xr.addEventListener('sessionend', () => {
-  hitTestSource = null;
-  overlayPivot.visible = false;
+  arView.visible = false;
   if (calibrating) toggleCalibration();
   $('panel').hidden = false;
 });
@@ -347,9 +342,8 @@ renderer.setAnimationLoop((time, xrFrame) => {
   const dt = (now - lastTime) / 1000;
   lastTime = now;
   const detected = runDetection();
-  const inAR = renderer.xr.isPresenting;
 
-  if (!inAR) {
+  if (!renderer.xr.isPresenting) {
     if (detected) {
       drawView();
       present();
@@ -357,57 +351,12 @@ renderer.setAnimationLoop((time, xrFrame) => {
     return;
   }
 
-  updateGaze(xrFrame);
-  updateCalibration(xrFrame, dt);
-  overlayPivot.visible = video?.videoWidth > 0;
-  if (overlayPivot.visible) {
-    layoutOverlay();
-    if (detected || calibrating) drawOverlay();
-    const target = lookedAt();
-    dot.material.color.set(target?.color ?? DOT_COLOR);
+  arView.visible = video?.videoWidth > 0;
+  if (arView.visible) {
+    const changed = updateCalibration(xrFrame, dt);
+    layoutARView();
+    uploadVideoFrame();
+    if (detected || changed || calibrating) drawBoxes();
   }
   renderer.render(scene, camera);
 });
-
-// --- Helpers ----------------------------------------------------------------
-
-function circleTexture() {
-  const c = document.createElement('canvas');
-  c.width = c.height = 64;
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = '#fff';
-  ctx.beginPath();
-  ctx.arc(32, 32, 28, 0, Math.PI * 2);
-  ctx.fill();
-  return new THREE.CanvasTexture(c);
-}
-
-function makeTextSprite() {
-  const c = document.createElement('canvas');
-  c.width = 1024;
-  c.height = 256;
-  const ctx = c.getContext('2d');
-  const texture = new THREE.CanvasTexture(c);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false }));
-  sprite.renderOrder = 10;
-  sprite.visible = false;
-  let current = null;
-  return {
-    sprite,
-    set(text) {
-      if (text === current) return;
-      current = text;
-      ctx.clearRect(0, 0, c.width, c.height);
-      ctx.font = 'bold 52px system-ui, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      const w = Math.min(ctx.measureText(text).width + 64, c.width);
-      ctx.fillStyle = 'rgba(0,0,0,.7)';
-      ctx.fillRect((c.width - w) / 2, 64, w, 128);
-      ctx.fillStyle = '#fff';
-      ctx.fillText(text, c.width / 2, 128, c.width - 32);
-      texture.needsUpdate = true;
-    },
-  };
-}
