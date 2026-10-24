@@ -50,3 +50,5 @@ Some questions we've asked ourselves are:
     - How long could an agent talk about a topic before it just starts talking nonesense, starts hallucinating?
     - How does the framing of information change the perception of the user? If the information provided is framed as a encyclopedia, as an advertisement, as a story?
     - Who controls the framing of the information? The user, a third party, an agent, an institution?
+
+yolo for image recognition
