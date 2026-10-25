@@ -34,17 +34,9 @@ To round off the experience we made the conscious decision to not only focus on 
 
 ## Backgrounds (aka Who built this?) (30s)
 
-Mischka and Me are doing our bachelors in Computer Science at ETH Zürich. Vale graduated from the same major this summer. Lean graduated from her Visual Communication bachelors at F+F this summer.
+Mischka and I are doing our bachelors in Computer Science at ETH Zürich. Vale graduated from the same major this summer. Lean graduated from her Visual Communication bachelors at F+F this summer.
 
-Vale did a lot of the setup work, making sure the llm server is hooked up and was crutial for the initial part of the project. Mischka did the prototyping for the web app, getting the object recognition to work. 
-
-I recently did a live coding set for the artist collective unsorted.love.
-
-Mischka studies in the same year as me and also shares an interest in art. She likes to do ascii live coding.
-
-Vale graduated from the ETH CompSci bachelor this summer. Right now he's working in tech, so he arguably has the most programming experience from all of us.
-
-Lean graduated this summer from her graphic design studies at F+F. She likes electronic music and synthesizers. You can catch her at the live video festival on the 21st of November where she’ll be doing a live coded performance. 
+Vale did a lot of the setup work, making sure the llm server is hooked up and was crucial for the initial part of the project. Mischka did the prototyping for the web app, getting the object recognition to work. Lean incorporated the music and worked on the slides, whereas I got the voice narration working and the pitch.
 
 ## What's next (30s)
 
