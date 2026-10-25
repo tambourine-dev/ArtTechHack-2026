@@ -28,7 +28,7 @@ We connected our web app to lama.cpp, meaning that we had a local instance of an
 
 There is also a separate user interface that controls how many visual stimuli are considered. If the threshold is low, only a small number of bounding boxes is shown. A higher stimuli percentage leads to more boxes and even multiple narrations at the same time, creating a sort of disorienting and overstimulating sensation.
 
-The core theme we wanted to convey with our work was the feeling of being overstimulated, which is why we also incorporated the glitch effect. After iterating through different scenarios and experimenting
+The core theme we wanted to convey with our work was the feeling of being overstimulated, which is why after iterating through different scenarios, we incorporated the glitch effect.
 
 To round off the experience we made the conscious decision to not only focus on the visual layer, but incorporate also music snippets that underline the spatial dimension.
 
