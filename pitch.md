@@ -28,7 +28,7 @@ We connected our web app to lama.cpp, meaning that we had a local instance of an
 
 There is also a separate user interface that controls how many visual stimuli are considered. If the threshold is low, only a small number of bounding boxes is shown. A higher stimuli percentage leads to more boxes and even multiple narrations at the same time, creating a sort of disorienting and overstimulating sensation.
 
-After iterating through different scenarios and experimenting with we agreed on a simpler visual identity and use these simpler bounding boxes to 
+The core theme we wanted to convey with our work was the feeling of being overstimulated, which is why we also incorporated the glitch effect. After iterating through different scenarios and experimenting
 
 To round off the experience we made the conscious decision to not only focus on the visual layer, but incorporate also music snippets that underline the spatial dimension.
 
@@ -41,3 +41,5 @@ Vale did a lot of the setup work, making sure the llm server is hooked up and wa
 ## What's next (30s)
 
 We wish to expand this project into an exhibition format. We want to incorporate more stimuli that our bodies are able to take in, like audio stimuli or bodily sensations. We want to expand on the descriptions of the objects surrounding us, for example their materials, colors, dimensions or histories. 
+
+The technologies we used lend themselves for more critical analysis: Questions like privacy issues, surveillance, misinformation or biases arise when we blindly let an LLM narrate our surroundings.
