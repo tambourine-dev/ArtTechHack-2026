@@ -12,7 +12,7 @@ So we wanted to tackle the following questions in our project:
 
 - How can we use AI to process spatial information?
 - How should we make the information available to the user?
-- How can we make the user experience how much information they filter out?
+- How can we show the information filtered by our consciousness?
 
 ## Demo (3-4 min)
 
@@ -34,7 +34,11 @@ To round off the experience we made the conscious decision to not only focus on 
 
 ## Backgrounds (aka Who built this?) (30s)
 
-Im Tamara, i'm doing my bachelors in computer science in the third year. I recently did a live coding set for the artist collective unsorted.love.
+Mischka and Me are doing our bachelors in Computer Science at ETH Zürich. Vale graduated from the same major this summer. Lean graduated from her Visual Communication bachelors at F+F this summer.
+
+Vale did a lot of the setup work, making sure the llm server is hooked up and was crutial for the initial part of the project. Mischka did the prototyping for the web app, getting the object recognition to work. 
+
+I recently did a live coding set for the artist collective unsorted.love.
 
 Mischka studies in the same year as me and also shares an interest in art. She likes to do ascii live coding.
 
